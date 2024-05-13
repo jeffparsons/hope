@@ -248,6 +248,10 @@ fn main() -> anyhow::Result<()> {
     let mut can_cache = true;
     for path in dep_info.files.keys() {
         if path.starts_with(target_dir_str) {
+            // This file was created by a build script, so its mtime will be after the start
+            // of the build. (TODO: Check what the "build start time" is set to -- is it the
+            // start of the `cargo build`? I guess it must be, or the output of the build script
+            // would not have a greater mtime than the start of the crate that consumes it.)
             writeln!(
                 log_file,
                 "Ignoring {:?} because it is inside the target dir",
