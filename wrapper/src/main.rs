@@ -130,6 +130,116 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse_from(args_to_parse);
 
+    // See if we can use copy cached output instead of calling rustc ourselves.
+    // TODO: This is all hacks. We should be properly handling any combination of "--emit" options.
+    if args.emit.iter().any(|emit| emit == "link") {
+        'tryadopt: {
+            // TODO: Lots of this is copypasta. Do a big ol' refactor.
+
+            let out_dir = args
+                .out_dir
+                .clone()
+                .context("Missing out-dir; don't know how to find build artifacts")?;
+            let out_dir_pb =
+                PathBuf::from_str(&out_dir).context("Invalid path in out-dir argument")?;
+
+            let crate_name = args
+                .crate_name
+                .clone()
+                .context("Missing crate name argument")?;
+            let extra_filename = args
+                .codegen_options
+                .iter()
+                .filter_map(|codegen_option| {
+                    if let FlagOrKvPair::KvPair(kv_pair) = codegen_option {
+                        Some(kv_pair)
+                    } else {
+                        None
+                    }
+                })
+                .find(|kv_pair| kv_pair.key == "extra-filename")
+                .context("Missing extra-filename codegen option")?
+                .value
+                .clone();
+
+            let crate_unit_name = format!("{crate_name}{extra_filename}");
+
+            let build_manifests_dir = Path::new("/tmp/build-manifests");
+            if !build_manifests_dir.exists() {
+                break 'tryadopt;
+            }
+            let manifest_file_name = format!("{crate_unit_name}.manifest.json");
+            let manifest_file_path = build_manifests_dir.join(manifest_file_name);
+            if !manifest_file_path.exists() {
+                break 'tryadopt;
+            }
+            let build_manifest_json = std::fs::read_to_string(manifest_file_path)
+                .context("Failed to load build manifest")?;
+            let build_manifest: BuildManifest = serde_json::from_str(&build_manifest_json)
+                .context("Failed to parse build manifest JSON file")?;
+
+            // TODO: This is a bit dodgy. We can't actually assume this is true.
+            let mut target_dir = out_dir_pb.clone();
+            while !target_dir.ends_with("target") {
+                target_dir.pop();
+            }
+            let target_dir_str = target_dir
+                .as_os_str()
+                .to_str()
+                .context("Bad UTF-8 in target dir")?;
+
+            // Check if we can reuse the cached artifacts.
+            // TODO: The naive version of this will have a TOCTOU race when
+            // copying the output files across. But I'm not even checking
+            // their mtime/digest _at all_ at the moment, so that's a later problem. :P
+            for (file_path, stored_digest) in &build_manifest.file_hashes {
+                if file_path.starts_with(target_dir_str) {
+                    // Skip stuff in the target dir.
+                    // TODO: I'm not sure this is valid, but I want to ignore the ".d" files for now,
+                    // because they'll definitely differ.
+                    continue;
+                }
+
+                // Compute hash of each source file and make sure it matches.
+                let mut hasher = Sha256::new();
+                let file_content = std::fs::read(file_path)
+                    .with_context(|| format!("Failed to read source file {file_path:?}"))?;
+                hasher.update(file_content);
+                let source_digest = hasher.finalize();
+                if *stored_digest != hex::encode(source_digest) {
+                    break 'tryadopt;
+                }
+            }
+
+            // Looks like we can use it! Copy the output files into our own build dir.
+            // First check that all the source files exist before we even start trying
+            // to copy anything.
+            for out_file_path in &build_manifest.out_file_paths {
+                let out_file_pb =
+                    PathBuf::from_str(out_file_path).context("Failed to parse out file path")?;
+                if !out_file_pb.exists() {
+                    break 'tryadopt;
+                }
+            }
+            for out_file_path in build_manifest.out_file_paths {
+                let out_file_pb =
+                    PathBuf::from_str(&out_file_path).context("Failed to parse out file path")?;
+                let dest_path =
+                    out_dir_pb.join(out_file_pb.file_name().context("Bad out file name")?);
+                let dest_dir = dest_path
+                    .parent()
+                    .context("Failed to pop to parent dir of dest path")?;
+                if !dest_dir.exists() {
+                    std::fs::create_dir_all(dest_dir).context("Failed to create dest dir")?;
+                }
+                std::fs::copy(out_file_pb, &dest_path)
+                    .with_context(|| format!("Failed to copy out file {out_file_path:?} to {dest_path:?}; do source file and dest dir exist?"))?;
+            }
+
+            return Ok(());
+        }
+    }
+
     let status = Command::new(rustc_path)
         .args(pass_through_args)
         .status()
@@ -155,7 +265,9 @@ fn main() -> anyhow::Result<()> {
         })
         .any(|kv_pair| kv_pair.key == "incremental")
     {
-        // We can't cache incremental builds.
+        // We can't cache incremental builds because there is no "invoked.timestamp" file.
+        // (TODO: It might actually not be missing because it's incremental; it might be
+        // missing for some other reason related to being the top-level crate.)
         return Ok(());
     }
 
@@ -259,14 +371,21 @@ fn main() -> anyhow::Result<()> {
     // In fact, I'm just going to skip that bit entirely right now, and pretend
     // that I've done it so I can get to the "consumer" side of this experiment faster! :P
 
-    let mut out_file_names = Vec::new();
+    let mut out_file_paths = Vec::new();
 
-    for filename in dep_info.files.keys() {
+    for file_path in dep_info.files.keys() {
         // TODO: I would have thought that this would catch deps from _other_ crates. But for some reason
         // I'm not seeing them in the simple ".d" files I've inspected so far. Need to understand that.
         // I should probably construct these file paths myself rather than just checking what ends up in the ".d" file.
-        if filename.ends_with(".d") || filename.ends_with(".rlib") || filename.ends_with(".rmeta") {
-            out_file_names.push(filename.to_owned());
+        //
+        // TODO: Also... OMG hacks. I really need to start documenting (with citations)
+        // the logic that Cargo and rustc use for naming these things.
+        if file_path.ends_with(".d")
+            || file_path.ends_with(".rlib")
+            || file_path.ends_with(".rmeta")
+            || file_path.ends_with(&format!("/{crate_unit_name}"))
+        {
+            out_file_paths.push(file_path.to_owned());
         }
     }
 
@@ -274,7 +393,7 @@ fn main() -> anyhow::Result<()> {
         crate_unit_name: crate_unit_name.clone(),
         file_hashes,
         out_dir,
-        out_file_names,
+        out_file_paths,
     };
 
     // Check whether we can actually cache this result.
@@ -344,5 +463,5 @@ struct BuildManifest {
     file_hashes: HashMap<String, String>,
     out_dir: String,
     // Differs depending on the kind of thing being built
-    out_file_names: Vec<String>,
+    out_file_paths: Vec<String>,
 }
