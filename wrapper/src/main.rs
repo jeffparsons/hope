@@ -75,15 +75,15 @@ struct Args {
     explain: bool,
     #[arg(long)]
     test: bool,
-    #[arg(short = 'W', value_delimiter = ',')]
+    #[arg(long = "warn", short = 'W', value_delimiter = ',')]
     warn_for_lints: Vec<String>,
     #[arg(long = "force-warn", value_delimiter = ',')]
     force_warn_for_lints: Vec<String>,
-    #[arg(short = 'A', value_delimiter = ',')]
+    #[arg(long = "allow", short = 'A', value_delimiter = ',')]
     allow_lints: Vec<String>,
-    #[arg(short = 'D', value_delimiter = ',')]
+    #[arg(long = "deny", short = 'D', value_delimiter = ',')]
     deny_lints: Vec<String>,
-    #[arg(short = 'F', value_delimiter = ',')]
+    #[arg(long = "forbid", short = 'F', value_delimiter = ',')]
     forbid_lints: Vec<String>,
     #[arg(short = 'Z', value_delimiter = ',')]
     unstable_options: Vec<String>,
@@ -164,6 +164,10 @@ fn main() -> anyhow::Result<()> {
 
             let crate_unit_name = format!("{crate_name}{extra_filename}");
 
+            let wrapper_log_file_name = format!("{crate_unit_name}.wrapper-log");
+            let wrapper_log_path = out_dir_pb.join(wrapper_log_file_name);
+            let mut log_file = File::create(wrapper_log_path).context("Failed to open log file")?;
+
             let build_manifests_dir = Path::new("/tmp/build-manifests");
             if !build_manifests_dir.exists() {
                 break 'tryadopt;
@@ -218,6 +222,8 @@ fn main() -> anyhow::Result<()> {
                 let out_file_pb =
                     PathBuf::from_str(out_file_path).context("Failed to parse out file path")?;
                 if !out_file_pb.exists() {
+                    writeln!(log_file, "Missing file {out_file_path:?}")?;
+
                     break 'tryadopt;
                 }
             }
@@ -232,6 +238,9 @@ fn main() -> anyhow::Result<()> {
                 if !dest_dir.exists() {
                     std::fs::create_dir_all(dest_dir).context("Failed to create dest dir")?;
                 }
+
+                writeln!(log_file, "Copying file {out_file_path:?} to {dest_path:?}")?;
+
                 std::fs::copy(out_file_pb, &dest_path)
                     .with_context(|| format!("Failed to copy out file {out_file_path:?} to {dest_path:?}; do source file and dest dir exist?"))?;
             }
@@ -303,21 +312,12 @@ fn main() -> anyhow::Result<()> {
         .value
         .clone();
 
-    // TODO: Better understand what these two different things actually represent. This is a bit of a guess.
     let crate_unit_name = format!("{crate_name}{extra_filename}");
-    let out_dir_name = out_dir_pb
-        .components()
-        .last()
-        .context("No path components in out-dir")?
-        .as_os_str()
-        .to_str()
-        .context("Bad UTF-8 in out-dir")?
-        .to_owned();
-    let package_unit_name = if out_dir_name == "deps" {
-        crate_unit_name.clone()
-    } else {
-        out_dir_name
-    };
+    // NOTE: We can't just transform crate name from snake case to kebab,
+    // because package names are allowed to use whichever they want.
+    let package_name =
+        std::env::var("CARGO_PKG_NAME").context("Missing 'CARGO_PKG_NAME' env var")?;
+    let package_unit_name = format!("{package_name}{extra_filename}");
 
     // Load deps file
     let unit_deps_file_name = format!("{crate_unit_name}.d");
