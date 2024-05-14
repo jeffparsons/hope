@@ -1,11 +1,14 @@
 mod dep_info;
 
+use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fs::File, process::Command, str::FromStr};
 
 use anyhow::Context;
 use clap::Parser;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use dep_info::DepInfo;
 
@@ -163,21 +166,17 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let out_dir = PathBuf::from_str(
-        &args
-            .out_dir
-            .context("Missing out-dir; don't know how to find build artifacts")?,
-    )
-    .context("Invalid path in out-dir argument")?;
+    let out_dir = args
+        .out_dir
+        .context("Missing out-dir; don't know how to find build artifacts")?;
+    let out_dir_pb = PathBuf::from_str(&out_dir).context("Invalid path in out-dir argument")?;
 
     // Check if any of the sources files were changed since the build started.
     // (We can't use this build if anything changed, because we don't know
     // which changes if any actually affected the output of the build!)
 
-    // TODO: Assert that there's only one metadata value here; we won't know
-    // what to do if there are multiple.
     let crate_name = args.crate_name.context("Missing crate name argument")?;
-    let metadata_hash = args
+    let extra_filename = args
         .codegen_options
         .iter()
         .filter_map(|codegen_option| {
@@ -187,14 +186,14 @@ fn main() -> anyhow::Result<()> {
                 None
             }
         })
-        .find(|kv_pair| kv_pair.key == "metadata")
-        .context("Missing metadata codegen option")?
+        .find(|kv_pair| kv_pair.key == "extra-filename")
+        .context("Missing extra-filename codegen option")?
         .value
         .clone();
 
     // TODO: Better understand what these two different things actually represent. This is a bit of a guess.
-    let crate_unit_name = format!("{crate_name}-{metadata_hash}");
-    let out_dir_name = out_dir
+    let crate_unit_name = format!("{crate_name}{extra_filename}");
+    let out_dir_name = out_dir_pb
         .components()
         .last()
         .context("No path components in out-dir")?
@@ -210,12 +209,12 @@ fn main() -> anyhow::Result<()> {
 
     // Load deps file
     let unit_deps_file_name = format!("{crate_unit_name}.d");
-    let unit_deps_path = out_dir.join(unit_deps_file_name);
+    let unit_deps_path = out_dir_pb.join(unit_deps_file_name);
     let dep_info = DepInfo::load(&unit_deps_path)
         .with_context(|| format!("Failed to load dep info file {:?}", unit_deps_path))?;
 
     // TODO: This is a bit dodgy. We can't actually assume this is true.
-    let mut target_dir = out_dir.clone();
+    let mut target_dir = out_dir_pb.clone();
     while !target_dir.ends_with("target") {
         target_dir.pop();
     }
@@ -236,11 +235,52 @@ fn main() -> anyhow::Result<()> {
     //
     // TODO: Make this structured.
     let wrapper_log_file_name = format!("{crate_unit_name}.wrapper-log");
-    let wrapper_log_path = out_dir.join(wrapper_log_file_name);
+    let wrapper_log_path = out_dir_pb.join(wrapper_log_file_name);
     let mut log_file = File::create(wrapper_log_path).context("Failed to open log file")?;
 
     writeln!(log_file, "Build invoked: {:?}", invoked_ts)?;
 
+    // Build a manifest of the input data: crate name, 'metadata' value, and a hash of all files that went into it.
+    // TODO: Figure out exactly what Cargo provides in the `-C metadata` value, and avoid repeating that work.
+    // It at least can't know _all_ source files, because those aren't known until after rustc does
+    // macro expansion etc. -- it only knows '.rs' files before this happens.
+    let mut file_hashes: HashMap<String, String> = HashMap::new();
+    for file_path in dep_info.files.keys() {
+        let mut hasher = Sha256::new();
+        let file_content = std::fs::read(file_path).context("Failed to read source file")?;
+        hasher.update(file_content);
+        let source_digest = hasher.finalize();
+        file_hashes.insert(file_path.to_owned(), hex::encode(source_digest));
+    }
+
+    // Now hash the output files.
+    // TODO: Oh... those are going to have absolute paths in them, aren't they.
+    // Maybe we should just go with an mtime for now. Yeah, let's do that.
+    // In fact, I'm just going to skip that bit entirely right now, and pretend
+    // that I've done it so I can get to the "consumer" side of this experiment faster! :P
+
+    let mut out_file_names = Vec::new();
+
+    for filename in dep_info.files.keys() {
+        // TODO: I would have thought that this would catch deps from _other_ crates. But for some reason
+        // I'm not seeing them in the simple ".d" files I've inspected so far. Need to understand that.
+        // I should probably construct these file paths myself rather than just checking what ends up in the ".d" file.
+        if filename.ends_with(".d") || filename.ends_with(".rlib") || filename.ends_with(".rmeta") {
+            out_file_names.push(filename.to_owned());
+        }
+    }
+
+    let build_manifest = BuildManifest {
+        crate_unit_name: crate_unit_name.clone(),
+        file_hashes,
+        out_dir,
+        out_file_names,
+    };
+
+    // Check whether we can actually cache this result.
+    // NOTE: This MUST happen last, before computing anything else
+    // that we might cache based on source file content,
+    // else we might be caching lies.
     let target_dir_str = target_dir
         .as_os_str()
         .to_str()
@@ -278,5 +318,31 @@ fn main() -> anyhow::Result<()> {
 
     writeln!(log_file, "Can cache? {:?}", can_cache)?;
 
+    if !can_cache {
+        return Ok(());
+    }
+
+    // Dump the manifest somewhere people can find it.
+    let build_manifests_dir = Path::new("/tmp/build-manifests");
+    if !build_manifests_dir.exists() {
+        std::fs::create_dir(build_manifests_dir).context("Failed to create build-manifests dir")?;
+    }
+    let build_manifest_json = serde_json::to_string_pretty(&build_manifest)
+        .context("Failed to serialize build manifest")?;
+    let manifest_file_name = format!("{crate_unit_name}.manifest.json");
+    let manifest_file_path = build_manifests_dir.join(manifest_file_name);
+    std::fs::write(manifest_file_path, build_manifest_json)
+        .context("Failed to write build manifest file")?;
+
     Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct BuildManifest {
+    crate_unit_name: String,
+    // Hex-encoded hashes
+    file_hashes: HashMap<String, String>,
+    out_dir: String,
+    // Differs depending on the kind of thing being built
+    out_file_names: Vec<String>,
 }
