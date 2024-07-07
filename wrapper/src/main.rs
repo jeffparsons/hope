@@ -44,9 +44,10 @@ struct KeyValuePair {
 // Arguments here mirror the real `rustc` arguments.
 // I'm just using Clap to make it easier to inspect/modify the ones I care about.
 #[derive(Parser, Debug)]
-#[command(version)]
+#[command(disable_version_flag = true, disable_help_flag = true)]
 struct Args {
-    input: String,
+    // Not required if, e.g., passing `--version`.
+    input: Option<String>,
     #[arg(long, value_delimiter = ',')]
     cfg: Vec<String>,
     #[arg(short = 'L', value_delimiter = ',')]
@@ -91,8 +92,10 @@ struct Args {
     cap_lints: Option<String>,
     #[arg(short = 'C', long = "codegen", value_delimiter = ',')]
     codegen_options: Vec<FlagOrKvPair>,
-    #[arg(short, long, default_value_t)]
-    verbose: u8,
+    #[arg(short = 'V', long)]
+    version: bool,
+    #[arg(short, long)]
+    verbose: bool,
     #[arg(long = "extern", value_delimiter = ',')]
     extern_: Vec<String>,
     #[arg(long)]
