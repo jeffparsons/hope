@@ -17,6 +17,9 @@ fn build_crate_with_simple_dep() {
     let package = Package::new();
     package.add("anyhow@1.0.0");
     package.build();
+
+    // TODO: Make a structured log about what happened
+    // during the build, and assert stuff about that.
 }
 
 //
@@ -72,6 +75,8 @@ fn cargo() -> Command {
     command.env("RUSTC_WRAPPER", WRAPPER_PATH);
     // REVISIT: Maybe we should forward this via `println!`
     // instead so that it gets shown if tests fail.
+    //
+    // See <https://github.com/rust-lang/rust/issues/92370>.
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
     command

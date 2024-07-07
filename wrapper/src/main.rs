@@ -1,14 +1,15 @@
+mod cache;
 mod dep_info;
 
-use std::collections::HashMap;
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::{fs::File, process::Command, str::FromStr};
 
 use anyhow::Context;
+use cache::{Cache, LocalCache};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use dep_info::DepInfo;
 
@@ -125,6 +126,8 @@ fn main() -> anyhow::Result<()> {
     let rustc_path = args
         .next()
         .context("Missing argument for real `rustc` path")?;
+    let rustc_path =
+        PathBuf::from_str(&rustc_path).context("Invalid path in rustc path argument")?;
 
     // REVISIT: If I want to start _modifying_ arguments eventually,
     // then I'll need to reconstruct the arg vector from our parsed arguments.
@@ -133,9 +136,70 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse_from(args_to_parse);
 
+    let Some(input_path) = &args.input else {
+        // No input path; we're not actually building anything.
+        return run_real_rustc(&rustc_path, pass_through_args);
+    };
+    let input_path =
+        PathBuf::from_str(input_path).context("Invalid path in input path argument")?;
+
+    if !input_path.components().any(|component| {
+        component
+            .as_os_str()
+            .as_bytes()
+            .starts_with(b"index.crates.io-")
+    }) {
+        // This doesn't look like a crate from crates.io;
+        // don't try to interact with the cache.
+        return run_real_rustc(&rustc_path, pass_through_args);
+    }
+
+    // TODO: Make this configurable through... I guess an environment variable?
+    // Maybe also a config file, so that you can define your own cache layering.
+    let cache_dir = Path::new("/tmp/cargo-cache-hacks");
+    if !cache_dir.exists() {
+        std::fs::create_dir(cache_dir).context("Failed to create cargo-cache-hacks dir")?;
+    }
+
+    let crate_name = args
+        .crate_name
+        .clone()
+        .context("Missing crate name argument")?;
+    let extra_filename = args
+        .codegen_options
+        .iter()
+        .filter_map(|codegen_option| {
+            if let FlagOrKvPair::KvPair(kv_pair) = codegen_option {
+                Some(kv_pair)
+            } else {
+                None
+            }
+        })
+        .find(|kv_pair| kv_pair.key == "extra-filename")
+        .context("Missing extra-filename codegen option")?
+        .value
+        .clone();
+
+    let crate_unit_name = format!("{crate_name}{extra_filename}");
+
+    // Try to pull from the cache.
+    let cache = LocalCache::new(cache_dir);
+    if cache.pull(&crate_unit_name).is_ok() {
+        // We got it from cache; we're done!
+        return Ok(());
+    }
+    // REVISIT: Care about the specific error.
+
     // See if we can use copy cached output instead of calling rustc ourselves.
     // TODO: This is all hacks. We should be properly handling any combination of "--emit" options.
+    //
+    // TODO: We should actually be checking that we can provide _all_
+    // of the output kinds that it wants, and passing through any
+    // that we can't provide to the real rustc. Or something like that?
     if args.emit.iter().any(|emit| emit == "link") {
+        dbg!(&args);
+        // panic!("wheee");
+
         'tryadopt: {
             // TODO: Lots of this is copypasta. Do a big ol' refactor.
 
@@ -195,29 +259,6 @@ fn main() -> anyhow::Result<()> {
                 .to_str()
                 .context("Bad UTF-8 in target dir")?;
 
-            // Check if we can reuse the cached artifacts.
-            // TODO: The naive version of this will have a TOCTOU race when
-            // copying the output files across. But I'm not even checking
-            // their mtime/digest _at all_ at the moment, so that's a later problem. :P
-            for (file_path, stored_digest) in &build_manifest.file_hashes {
-                if file_path.starts_with(target_dir_str) {
-                    // Skip stuff in the target dir.
-                    // TODO: I'm not sure this is valid, but I want to ignore the ".d" files for now,
-                    // because they'll definitely differ.
-                    continue;
-                }
-
-                // Compute hash of each source file and make sure it matches.
-                let mut hasher = Sha256::new();
-                let file_content = std::fs::read(file_path)
-                    .with_context(|| format!("Failed to read source file {file_path:?}"))?;
-                hasher.update(file_content);
-                let source_digest = hasher.finalize();
-                if *stored_digest != hex::encode(source_digest) {
-                    break 'tryadopt;
-                }
-            }
-
             // Looks like we can use it! Copy the output files into our own build dir.
             // First check that all the source files exist before we even start trying
             // to copy anything.
@@ -252,18 +293,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    let status = Command::new(rustc_path)
-        .args(pass_through_args)
-        .status()
-        .context("Failed to start real `rustc`")?;
-
-    if !status.success() {
-        std::process::exit(
-            status
-                .code()
-                .context("Child process was terminated by a signal")?,
-        );
-    }
+    run_real_rustc(&rustc_path, pass_through_args)?;
 
     if args
         .codegen_options
@@ -334,6 +364,11 @@ fn main() -> anyhow::Result<()> {
         target_dir.pop();
     }
 
+    // TODO: Ha, we don't need fingerprints or _anything_. Wheeeee.
+    // But we can use cargo to find the output directory. Or...
+    // just use the command line flags. Maybe we don't actually need
+    // to know much about what Cargo is doing except the fact that it
+    // came from an immutable source!!!!!!!!!!
     let fingerprint_dir = target_dir.join("debug").join(".fingerprint");
     let invoked_timestamp_path = fingerprint_dir
         .join(package_unit_name)
@@ -355,27 +390,18 @@ fn main() -> anyhow::Result<()> {
 
     writeln!(log_file, "Build invoked: {:?}", invoked_ts)?;
 
+    // TODO: not this noise.
+    //
     // Build a manifest of the input data: crate name, 'metadata' value, and a hash of all files that went into it.
     // TODO: Figure out exactly what Cargo provides in the `-C metadata` value, and avoid repeating that work.
     // It at least can't know _all_ source files, because those aren't known until after rustc does
     // macro expansion etc. -- it only knows '.rs' files before this happens.
-    let mut file_hashes: HashMap<String, String> = HashMap::new();
-    for file_path in dep_info.files.keys() {
-        let mut hasher = Sha256::new();
-        let file_content = std::fs::read(file_path).context("Failed to read source file")?;
-        hasher.update(file_content);
-        let source_digest = hasher.finalize();
-        file_hashes.insert(file_path.to_owned(), hex::encode(source_digest));
-    }
-
-    // Now hash the output files.
-    // TODO: Oh... those are going to have absolute paths in them, aren't they.
-    // Maybe we should just go with an mtime for now. Yeah, let's do that.
-    // In fact, I'm just going to skip that bit entirely right now, and pretend
-    // that I've done it so I can get to the "consumer" side of this experiment faster! :P
 
     let mut out_file_paths = Vec::new();
 
+    // TODO: do we actually need the dep_info? I don't think so...
+    // I think I was only using that because I wanted to hash all the
+    // input files. The rest should be created with formulaic names.
     for file_path in dep_info.files.keys() {
         // TODO: I would have thought that this would catch deps from _other_ crates. But for some reason
         // I'm not seeing them in the simple ".d" files I've inspected so far. Need to understand that.
@@ -394,7 +420,6 @@ fn main() -> anyhow::Result<()> {
 
     let build_manifest = BuildManifest {
         crate_unit_name: crate_unit_name.clone(),
-        file_hashes,
         out_dir,
         out_file_paths,
     };
@@ -407,7 +432,6 @@ fn main() -> anyhow::Result<()> {
         .as_os_str()
         .to_str()
         .context("Bad UTF-8 in target dir")?;
-    let mut can_cache = true;
     for path in dep_info.files.keys() {
         if path.starts_with(target_dir_str) {
             // This file was created by a build script, so its mtime will be after the start
@@ -421,28 +445,10 @@ fn main() -> anyhow::Result<()> {
             )?;
             continue;
         }
-
-        let file_metadata =
-            std::fs::metadata(path).context("Couldn't get metadata for source file")?;
-        let source_mtime = file_metadata
-            .modified()
-            .context("Missing mtime for source file")?;
-
-        writeln!(log_file, "{:?} mtime: {:?}", path, source_mtime)?;
-
-        if source_mtime > invoked_ts {
-            // One of the source files was modified after we started the build;
-            // we can't cache this output, because we don't know what went into it.
-            writeln!(log_file, "^ MODIFIED")?;
-            can_cache = false;
-        }
     }
 
-    writeln!(log_file, "Can cache? {:?}", can_cache)?;
-
-    if !can_cache {
-        return Ok(());
-    }
+    // TODO: Nah, not this. We actually need to copy it to a cache directory somewhere.
+    // And I think ideally compress it!!!!
 
     // Dump the manifest somewhere people can find it.
     let build_manifests_dir = Path::new("/tmp/build-manifests");
@@ -462,9 +468,22 @@ fn main() -> anyhow::Result<()> {
 #[derive(Serialize, Deserialize)]
 struct BuildManifest {
     crate_unit_name: String,
-    // Hex-encoded hashes
-    file_hashes: HashMap<String, String>,
     out_dir: String,
     // Differs depending on the kind of thing being built
     out_file_paths: Vec<String>,
+}
+
+fn run_real_rustc(rustc_path: &Path, pass_through_args: Vec<String>) -> anyhow::Result<()> {
+    let status = Command::new(rustc_path)
+        .args(pass_through_args)
+        .status()
+        .context("Failed to start real `rustc`")?;
+    if !status.success() {
+        std::process::exit(
+            status
+                .code()
+                .context("Child `rustc` process was terminated by a signal")?,
+        );
+    }
+    Ok(())
 }
