@@ -340,7 +340,7 @@ impl OutputDefn {
                     CrateType::Dylib => todo!(),
                     CrateType::Cdylib => todo!(),
                     CrateType::Bin => crate_unit_name.to_owned(),
-                    CrateType::ProcMacro => todo!(),
+                    CrateType::ProcMacro => format!("lib{crate_unit_name}.so"),
                 }
             }
             // TODO: This will need to be modified on push/pull to stop cargo from getting

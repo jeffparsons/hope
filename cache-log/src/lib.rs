@@ -43,6 +43,7 @@ pub fn write_log_line(out_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<
         .open(out_dir.join("cache-hacks.log"))?;
     let mut writer = BufWriter::new(file);
     serde_json::to_writer(&mut writer, &log_line)?;
+    writeln!(&mut writer)?;
     writer.flush()?;
 
     Ok(())
@@ -54,7 +55,10 @@ pub fn read_log(out_dir: &Path) -> anyhow::Result<Vec<CacheLogLine>> {
         .context("Failed to read log file")?
         .lines()
     {
-        log.push(serde_json::from_str(line).context("Failed to deserialize log line")?);
+        log.push(
+            serde_json::from_str(line)
+                .with_context(|| format!("Failed to deserialize log line:\n{line}"))?,
+        );
     }
     Ok(log)
 }

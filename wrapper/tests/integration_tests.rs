@@ -53,6 +53,25 @@ fn build_crate_with_simple_dep() {
     assert!(pull_event.crate_unit_name.starts_with("anyhow-"));
 }
 
+// Dep with proc macro.
+#[test]
+fn build_dep_with_proc_macro() {
+    let cache_dir = CacheDir::new();
+    let package_a = Package::new(&cache_dir);
+    package_a.add("serde_derive@1.0.0");
+    package_a.build();
+
+    // It should have written it to the cache.
+    let mut log = package_a.read_log("debug").unwrap();
+    log.retain(|line| {
+        let CacheLogLine::Pushed(push_event) = line else {
+            return false;
+        };
+        push_event.crate_unit_name.starts_with("serde_derive-")
+    });
+    assert_eq!(log.len(), 1);
+}
+
 // TODO:
 // - Multiple versions of the same dependency
 // - Deps with build scripts
