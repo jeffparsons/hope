@@ -25,7 +25,7 @@ fn build_crate_with_simple_dep() {
     package_a.build();
 
     // It should have written it to the cache.
-    let log = package_a.read_log().unwrap();
+    let log = package_a.read_log("debug").unwrap();
     assert_eq!(log.len(), 1);
     let CacheLogLine::Pushed(push_event) = &log[0] else {
         panic!("Expected push event");
@@ -37,7 +37,7 @@ fn build_crate_with_simple_dep() {
     package_a.build();
 
     // It should not have needed to build again.
-    let log = package_a.read_log().unwrap();
+    let log = package_a.read_log("debug").unwrap();
     assert_eq!(log.len(), 1);
 
     let package_b = Package::new(&cache_dir);
@@ -45,7 +45,7 @@ fn build_crate_with_simple_dep() {
     package_b.build();
 
     // Build for package b should have _pulled_ it from the cache.
-    let log = package_b.read_log().unwrap();
+    let log = package_b.read_log("debug").unwrap();
     assert_eq!(log.len(), 1);
     let CacheLogLine::Pulled(pull_event) = &log[0] else {
         panic!("Expected pull event");
@@ -142,7 +142,14 @@ impl Package {
             .success());
     }
 
-    fn read_log(&self) -> anyhow::Result<Vec<CacheLogLine>> {
-        read_log(&self.dir.path().join("target").join("debug").join("deps"))
+    fn read_log(&self, debug_or_release: &str) -> anyhow::Result<Vec<CacheLogLine>> {
+        read_log(
+            &self
+                .dir
+                .path()
+                .join("target")
+                .join(debug_or_release)
+                .join("deps"),
+        )
     }
 }
