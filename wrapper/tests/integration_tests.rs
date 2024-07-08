@@ -77,6 +77,8 @@ fn build_dep_with_proc_macro() {
 // - Deps with build scripts
 // - Deps with C dependencies
 // - Deps with proc macros
+// - Deps where the source mtimes are newer.
+//   - Specifically, we need to make sure it doesn't keep trying to rebuild.
 
 //
 // Test helpers
