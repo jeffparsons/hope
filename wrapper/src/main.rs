@@ -154,11 +154,14 @@ fn main() -> anyhow::Result<()> {
         return run_real_rustc(&rustc_path, pass_through_args);
     }
 
-    // TODO: Make this configurable through... I guess an environment variable?
-    // Maybe also a config file, so that you can define your own cache layering.
-    let cache_dir = Path::new("/tmp/cargo-cache-hacks");
+    let cache_dir = std::env::var("WRAPPER_HAX_CACHE_DIR")
+        .context("Missing 'WRAPPER_HAX_CACHE_DIR' env var")?;
+    let cache_dir =
+        PathBuf::from_str(&cache_dir).context("Bad path in 'WRAPPER_HAX_CACHE_DIR' env var")?;
     if !cache_dir.exists() {
-        std::fs::create_dir(cache_dir).context("Failed to create cargo-cache-hacks dir")?;
+        // Only attempt to create the directory, but not any parents;
+        // minimises the risk of really big oopsies.
+        std::fs::create_dir(&cache_dir).context("Failed to create cargo-cache-hacks dir")?;
     }
 
     let crate_name = args
