@@ -4,6 +4,8 @@ use std::{
 };
 
 use anyhow::Context;
+use cache_log::{write_log_line, CacheLogLine, PullEvent, PushEvent};
+use chrono::Utc;
 
 use crate::{CrateType, OutputType};
 
@@ -70,6 +72,17 @@ impl Cache for LocalCache {
                 .with_context(|| format!("Failed to copy file {file_name:?} from cache."))?;
         }
 
+        // Write out a log line describing where we got the unit from.
+        write_log_line(
+            out_dir,
+            CacheLogLine::Pulled(PullEvent {
+                crate_unit_name: crate_unit_name.to_owned(),
+                copied_at: Utc::now(),
+                copied_from: "local cache".to_string(),
+                did_mangle_on_pull: false,
+            }),
+        )?;
+
         Ok(())
 
         // TODO: We will need to rewrite dep info to fix up absolute paths.
@@ -101,6 +114,17 @@ impl Cache for LocalCache {
             std::fs::copy(from_path, to_path)
                 .with_context(|| format!("Failed to copy file {file_name:?} to cache."))?;
         }
+
+        // Write out a log line describing where we pushed the unit to.
+        write_log_line(
+            out_dir,
+            CacheLogLine::Pushed(PushEvent {
+                crate_unit_name: crate_unit_name.to_owned(),
+                copied_at: Utc::now(),
+                copied_from: "local cache".to_string(),
+                did_mangle_on_push: false,
+            }),
+        )?;
 
         Ok(())
     }

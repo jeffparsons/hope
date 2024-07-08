@@ -1,15 +1,13 @@
 mod cache;
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::{fs::File, process::Command, str::FromStr};
+use std::{process::Command, str::FromStr};
 
 use anyhow::Context;
 use cache::{Cache, LocalCache};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
 
 // TODO: I don't like this. I'd instead like to be able to collect
 // the flags and kv-pairs into a custom collection.
