@@ -409,3 +409,89 @@ impl FromStr for OutputType {
         }
     }
 }
+
+/// Output type with crate type for the `Link` output type.
+///
+/// This is enough information to generate an output file name
+/// given a base name.
+#[derive(Debug, PartialEq, Eq)]
+enum OutputDefn {
+    Asm,
+    LlvmBc,
+    LlvmIr,
+    Obj,
+    Metadata,
+    Link(CrateType),
+    DepInfo,
+    Mir,
+}
+
+impl OutputDefn {
+    fn file_name(&self, crate_unit_name: &str) -> String {
+        match self {
+            Self::Asm => format!("{crate_unit_name}.s"),
+            Self::LlvmBc => format!("{crate_unit_name}.bc"),
+            Self::LlvmIr => format!("{crate_unit_name}.ll"),
+            Self::Obj => format!("{crate_unit_name}.o"),
+            Self::Metadata => format!("lib{crate_unit_name}.rmeta"),
+            Self::Link(crate_type) => {
+                // TODO: This should depend on platform for many of these types!
+                match crate_type {
+                    // Assume lib is rlib for now, but that is not necessarily going
+                    // to be true forever.
+                    CrateType::Lib => format!("lib{crate_unit_name}.rlib"),
+                    CrateType::Rlib => format!("lib{crate_unit_name}.rlib"),
+                    CrateType::Staticlib => todo!(),
+                    CrateType::Dylib => todo!(),
+                    CrateType::Cdylib => todo!(),
+                    CrateType::Bin => crate_unit_name.to_owned(),
+                    CrateType::ProcMacro => todo!(),
+                }
+            }
+            // TODO: This will need to be modified on push/pull to stop cargo from getting
+            // confused and constantly trying to rebuild the crate.
+            //
+            // TODO: Also need tests to make sure that whatever you do here actually works!
+            Self::DepInfo => format!("{crate_unit_name}.d"),
+            Self::Mir => format!("{crate_unit_name}.mir"),
+        }
+    }
+}
+
+/// Return a list of all the outputs we should be creating,
+/// based on the '--emit' and '--crate-type' flags.
+fn output_defns(
+    crate_types: &HashSet<CrateType>,
+    output_types: &HashSet<OutputType>,
+) -> Vec<OutputDefn> {
+    let mut output_defns = vec![];
+    for output_type in output_types {
+        match output_type {
+            OutputType::Asm => output_defns.push(OutputDefn::Asm),
+            OutputType::LlvmBc => output_defns.push(OutputDefn::LlvmBc),
+            OutputType::LlvmIr => output_defns.push(OutputDefn::LlvmIr),
+            OutputType::Obj => output_defns.push(OutputDefn::Obj),
+            OutputType::Metadata => output_defns.push(OutputDefn::Metadata),
+            OutputType::Link => {
+                for crate_type in crate_types {
+                    match crate_type {
+                        CrateType::Lib => output_defns.push(OutputDefn::Link(CrateType::Lib)),
+                        CrateType::Rlib => output_defns.push(OutputDefn::Link(CrateType::Rlib)),
+                        CrateType::Staticlib => {
+                            output_defns.push(OutputDefn::Link(CrateType::Staticlib))
+                        }
+                        CrateType::Dylib => output_defns.push(OutputDefn::Link(CrateType::Dylib)),
+                        CrateType::Cdylib => output_defns.push(OutputDefn::Link(CrateType::Cdylib)),
+                        CrateType::Bin => output_defns.push(OutputDefn::Link(CrateType::Bin)),
+                        CrateType::ProcMacro => {
+                            output_defns.push(OutputDefn::Link(CrateType::ProcMacro))
+                        }
+                    }
+                }
+            }
+            OutputType::DepInfo => output_defns.push(OutputDefn::DepInfo),
+            OutputType::Mir => output_defns.push(OutputDefn::Mir),
+        }
+    }
+    output_defns
+}

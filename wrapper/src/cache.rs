@@ -7,6 +7,18 @@ use anyhow::Context;
 
 use crate::{CrateType, OutputType};
 
+/// It is the responsibility of a `Cache` implementation to
+/// modify files as necessary, either directly itself or by
+/// using another `Cache` implementation that it knows does this.
+///
+/// E.g. a local cache doesn't strictly need to mangle path
+/// names because all crates from crates.io will have their
+/// source in the same location. But an S3-backed cache will
+/// need to modify paths in '.d' files so that they work across
+/// different user accounts.
+///
+/// (In practice I think we'll make the local cache do all this
+/// because it'll make it easier to test.)
 pub trait Cache {
     fn pull(
         &self,
@@ -42,11 +54,23 @@ impl Cache for LocalCache {
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("TODO; returning an error here should allow the old impl to keep going");
+        let output_defns = crate::output_defns(crate_types, output_types);
+        for output_defn in output_defns {
+            // TODO: '.d' files will need to be modified on push/pull to stop cargo from getting
+            // confused and constantly trying to rebuild the crate. Are there any others that
+            // need similar treatment?
+            //
+            // TODO: Also need tests to make sure that whatever you do here actually works!
 
-        // TODO: After you get _push_ working, then you can test pull.
-        // So maybe go and do that first!
-        // todo!()
+            let file_name = output_defn.file_name(crate_unit_name);
+            let from_path = self.root.join(&file_name);
+            let to_path = out_dir.join(&file_name);
+            // Copy it to from cache dir.
+            std::fs::copy(from_path, to_path)
+                .with_context(|| format!("Failed to copy file {file_name:?} from cache."))?;
+        }
+
+        Ok(())
 
         // TODO: We will need to rewrite dep info to fix up absolute paths.
         // NOTE: `--remap-path-prefix` is not adequate for this; we actually
@@ -62,39 +86,15 @@ impl Cache for LocalCache {
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()> {
-        let mut file_names = vec![];
+        let output_defns = crate::output_defns(crate_types, output_types);
+        for output_defn in output_defns {
+            // TODO: '.d' files will need to be modified on push/pull to stop cargo from getting
+            // confused and constantly trying to rebuild the crate. Are there any others that
+            // need similar treatment?
+            //
+            // TODO: Also need tests to make sure that whatever you do here actually works!
 
-        for output_type in output_types {
-            match output_type {
-                OutputType::Asm => file_names.push(format!("{crate_unit_name}.s")),
-                OutputType::LlvmBc => file_names.push(format!("{crate_unit_name}.bc")),
-                OutputType::LlvmIr => file_names.push(format!("{crate_unit_name}.ll")),
-                OutputType::Obj => file_names.push(format!("{crate_unit_name}.o")),
-                OutputType::Metadata => file_names.push(format!("lib{crate_unit_name}.rmeta")),
-                OutputType::Link => {
-                    // TODO: This should depend on platform for many of these types!
-                    for crate_type in crate_types {
-                        match crate_type {
-                            // Assume lib is rlib for now, but that is not necessarily going
-                            // to be true forever.
-                            CrateType::Lib => file_names.push(format!("lib{crate_unit_name}.rlib")),
-                            CrateType::Rlib => {
-                                file_names.push(format!("lib{crate_unit_name}.rlib"))
-                            }
-                            CrateType::Staticlib => todo!(),
-                            CrateType::Dylib => todo!(),
-                            CrateType::Cdylib => todo!(),
-                            CrateType::Bin => file_names.push(crate_unit_name.to_owned()),
-                            CrateType::ProcMacro => todo!(),
-                        }
-                    }
-                }
-                OutputType::DepInfo => file_names.push(format!("{crate_unit_name}.d")),
-                OutputType::Mir => file_names.push(format!("{crate_unit_name}.mir")),
-            };
-        }
-
-        for file_name in file_names {
+            let file_name = output_defn.file_name(crate_unit_name);
             let from_path = out_dir.join(&file_name);
             let to_path = self.root.join(&file_name);
             // Copy it to the cache dir.

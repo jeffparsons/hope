@@ -19,12 +19,18 @@ fn build_crate_with_no_deps() {
 #[test]
 fn build_crate_with_simple_dep() {
     let cache_dir = CacheDir::new();
-    let package = Package::new(&cache_dir);
-    package.add("anyhow@1.0.0");
-    package.build();
+    let package_a = Package::new(&cache_dir);
+    package_a.add("anyhow@1.0.0");
+    package_a.build();
 
     // TODO: Make a structured log about what happened
     // during the build, and assert stuff about that.
+
+    let package_b = Package::new(&cache_dir);
+    package_b.add("anyhow@1.0.0");
+    package_b.build();
+
+    // TODO: Assert that this one didn't build 'anyhow'.
 }
 
 //
@@ -73,8 +79,8 @@ impl Package {
         // instead so that it gets shown if tests fail.
         //
         // See <https://github.com/rust-lang/rust/issues/92370>.
-        command.stdout(Stdio::null());
-        command.stderr(Stdio::null());
+        // command.stdout(Stdio::null());
+        // command.stderr(Stdio::null());
         command
     }
 
