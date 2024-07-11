@@ -74,8 +74,14 @@ impl Cache for LocalCache {
             let from_path = self.root.join(&file_name);
             let to_path = out_dir.join(&file_name);
             // Copy it to from cache dir.
-            std::fs::copy(from_path, to_path)
+            std::fs::copy(from_path, &to_path)
                 .with_context(|| format!("Failed to copy file {file_name:?} from cache."))?;
+
+            // Bump the new copy's mtime. In my testing on macOS,
+            // this seems to be necessary or the old mtime gets copied across
+            // causing spurious rebuilds!
+            filetime::set_file_mtime(to_path, filetime::FileTime::now())
+                .with_context(|| format!("Failed to update mtime for {file_name:?}."))?;
         }
 
         // Write out a log line describing where we got the unit from.
