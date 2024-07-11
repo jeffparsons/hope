@@ -340,7 +340,10 @@ impl OutputDefn {
                     CrateType::Dylib => todo!(),
                     CrateType::Cdylib => todo!(),
                     CrateType::Bin => crate_unit_name.to_owned(),
+                    #[cfg(target_os = "linux")]
                     CrateType::ProcMacro => format!("lib{crate_unit_name}.so"),
+                    #[cfg(target_os = "macos")]
+                    CrateType::ProcMacro => format!("lib{crate_unit_name}.dylib"),
                 }
             }
             // TODO: This will need to be modified on push/pull to stop cargo from getting

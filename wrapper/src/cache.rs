@@ -56,6 +56,12 @@ impl Cache for LocalCache {
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()> {
+        // TODO: If _anything_ in here fails, we should attempt to delete
+        // all the files that we copied, because otherwise we might have
+        // copied an 'rmeta' file without actually successfully copying
+        // the lib that it refers to, and then it's hard to get out of that
+        // stuck state.
+
         let output_defns = crate::output_defns(crate_types, output_types);
         for output_defn in output_defns {
             // TODO: '.d' files will need to be modified on push/pull to stop cargo from getting
