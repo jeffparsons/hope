@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::Context;
@@ -56,6 +57,8 @@ impl Cache for LocalCache {
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()> {
+        let before = Instant::now();
+
         // TODO: If _anything_ in here fails, we should attempt to delete
         // all the files that we copied, because otherwise we might have
         // copied an 'rmeta' file without actually successfully copying
@@ -92,6 +95,7 @@ impl Cache for LocalCache {
                 copied_at: Utc::now(),
                 copied_from: "local cache".to_string(),
                 did_mangle_on_pull: false,
+                duration_secs: before.elapsed().as_secs_f64(),
             }),
         )?;
 
@@ -111,6 +115,8 @@ impl Cache for LocalCache {
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()> {
+        let before = Instant::now();
+
         let output_defns = crate::output_defns(crate_types, output_types);
         for output_defn in output_defns {
             // TODO: '.d' files will need to be modified on push/pull to stop cargo from getting
@@ -135,6 +141,7 @@ impl Cache for LocalCache {
                 copied_at: Utc::now(),
                 copied_from: "local cache".to_string(),
                 did_mangle_on_push: false,
+                duration_secs: before.elapsed().as_secs_f64(),
             }),
         )?;
 

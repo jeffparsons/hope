@@ -23,6 +23,8 @@ pub struct PullEvent {
     pub copied_from: String,
     // Were modifications made to the file during pull?
     pub did_mangle_on_pull: bool,
+    // How long did it take to copy, mangle, etc.?
+    pub duration_secs: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +36,8 @@ pub struct PushEvent {
     pub copied_from: String,
     // Were modifications made to the file during push?
     pub did_mangle_on_push: bool,
+    // How long did it take to copy, mangle, etc.?
+    pub duration_secs: f64,
 }
 
 pub fn write_log_line(out_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<()> {

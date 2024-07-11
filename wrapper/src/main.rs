@@ -3,6 +3,7 @@ mod cache;
 use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::{process::Command, str::FromStr};
 
 use anyhow::Context;
@@ -226,6 +227,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_real_rustc(rustc_path: &Path, pass_through_args: Vec<String>) -> anyhow::Result<()> {
+    let before = Instant::now();
+    // dbg!(&pass_through_args[0..usize::min(pass_through_args.len(), 3)]);
+
     let status = Command::new(rustc_path)
         .args(pass_through_args)
         .status()
@@ -237,6 +241,12 @@ fn run_real_rustc(rustc_path: &Path, pass_through_args: Vec<String>) -> anyhow::
                 .context("Child `rustc` process was terminated by a signal")?,
         );
     }
+
+    // DEBUG: TODO: Put behind a verbose flag or something.
+    // Or just put it in the structured log.
+    // eprintln!("Real rustc took: {}", before.elapsed().as_secs_f32());
+    let _ = before;
+
     Ok(())
 }
 
