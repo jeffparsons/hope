@@ -1,11 +1,16 @@
 use std::{
     collections::HashSet,
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use anyhow::Context;
-use cache_log::{write_log_line, CacheLogLine, PullEvent, PushEvent};
+use cache_log::{
+    write_log_line, CacheLogLine, PullBuildScriptOutputsEvent, PullCrateOutputsEvent,
+    PushBuildScriptOutputsEvent, PushCrateOutputsEvent,
+};
 use chrono::Utc;
 
 use crate::{CrateType, OutputType};
@@ -23,20 +28,43 @@ use crate::{CrateType, OutputType};
 /// (In practice I think we'll make the local cache do all this
 /// because it'll make it easier to test.)
 pub trait Cache {
-    fn pull(
+    fn pull_crate_outputs(
         &self,
         out_dir: &Path,
         crate_unit_name: &str,
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()>;
-    fn push(
+
+    fn push_crate_outputs(
         &self,
         out_dir: &Path,
         crate_unit_name: &str,
         crate_types: &HashSet<CrateType>,
         output_types: &HashSet<OutputType>,
     ) -> anyhow::Result<()>;
+
+    fn pull_build_script_out_dir(
+        &self,
+        out_dir: &Path,
+        crate_unit_name: &str,
+    ) -> anyhow::Result<()>;
+
+    fn push_build_script_out_dir(
+        &self,
+        out_dir: &Path,
+        crate_unit_name: &str,
+    ) -> anyhow::Result<()>;
+
+    fn push_build_script_stdout(&self, crate_unit_name: &str, content: &[u8])
+        -> anyhow::Result<()>;
+
+    fn push_build_script_stderr(&self, crate_unit_name: &str, content: &[u8])
+        -> anyhow::Result<()>;
+
+    fn pull_build_script_stdout(&self, crate_unit_name: &str) -> anyhow::Result<Vec<u8>>;
+
+    fn pull_build_script_stderr(&self, crate_unit_name: &str) -> anyhow::Result<Vec<u8>>;
 }
 
 pub struct LocalCache {
@@ -50,7 +78,7 @@ impl LocalCache {
 }
 
 impl Cache for LocalCache {
-    fn pull(
+    fn pull_crate_outputs(
         &self,
         out_dir: &Path,
         crate_unit_name: &str,
@@ -90,7 +118,7 @@ impl Cache for LocalCache {
         // Write out a log line describing where we got the unit from.
         write_log_line(
             out_dir,
-            CacheLogLine::Pulled(PullEvent {
+            CacheLogLine::PulledCrateOutputs(PullCrateOutputsEvent {
                 crate_unit_name: crate_unit_name.to_owned(),
                 copied_at: Utc::now(),
                 copied_from: "local cache".to_string(),
@@ -108,7 +136,7 @@ impl Cache for LocalCache {
         // subtly misleading output (different paths on different people's machines).
     }
 
-    fn push(
+    fn push_crate_outputs(
         &self,
         out_dir: &Path,
         crate_unit_name: &str,
@@ -136,7 +164,7 @@ impl Cache for LocalCache {
         // Write out a log line describing where we pushed the unit to.
         write_log_line(
             out_dir,
-            CacheLogLine::Pushed(PushEvent {
+            CacheLogLine::PushedCrateOutputs(PushCrateOutputsEvent {
                 crate_unit_name: crate_unit_name.to_owned(),
                 copied_at: Utc::now(),
                 copied_from: "local cache".to_string(),
@@ -147,4 +175,151 @@ impl Cache for LocalCache {
 
         Ok(())
     }
+
+    fn pull_build_script_out_dir(
+        &self,
+        out_dir: &Path,
+        crate_unit_name: &str,
+    ) -> anyhow::Result<()> {
+        let before = Instant::now();
+
+        let tar_file_name = format!("{crate_unit_name}-out.tar");
+        let tar_path = self.root.join(tar_file_name);
+        let tar_file = File::open(tar_path).context("Failed to open \"out/\" dir tarball")?;
+        let mut archive = tar::Archive::new(tar_file);
+        archive
+            .unpack(out_dir)
+            .context("Failed to un-tar \"out/\" dir")?;
+
+        // Write out a log line describing where we pulled the build script output from.
+        //
+        // TODO: Replace these nasty hacks with a better way to determine
+        // the log path. (Or put it somewhere else!)
+        let log_dir = out_dir
+            .parent()
+            .context("Missing parent of crate build/out dir")?
+            .parent()
+            .context("Missing parent of crate build dir")?
+            .parent()
+            .context("Missing parent of build dir")?
+            .join("deps");
+        write_log_line(
+            &log_dir,
+            CacheLogLine::PulledBuildScriptOutputs(PullBuildScriptOutputsEvent {
+                crate_unit_name: crate_unit_name.to_owned(),
+                copied_at: Utc::now(),
+                copied_from: "local cache".to_string(),
+                did_mangle_on_pull: false,
+                duration_secs: before.elapsed().as_secs_f64(),
+            }),
+        )?;
+
+        Ok(())
+    }
+
+    fn push_build_script_out_dir(
+        &self,
+        out_dir: &Path,
+        crate_unit_name: &str,
+    ) -> anyhow::Result<()> {
+        let before = Instant::now();
+
+        let tar_file_name = format!("{crate_unit_name}-out.tar");
+        let tar_path = self.root.join(tar_file_name);
+        let tar_file =
+            File::create(tar_path).context("Failed to create \"out/\" dir file for writing")?;
+        let mut tar = tar::Builder::new(tar_file);
+        tar.append_dir_all(".", out_dir)
+            .context("Failed to add out dir to tar file")?;
+        tar.finish().context("Failed to finish writing tar file")?;
+
+        // Write out a log line describing where we pushed the build script output to.
+        //
+        // TODO: Replace these nasty hacks with a better way to determine
+        // the log path. (Or put it somewhere else!)
+        let log_dir = out_dir
+            .parent()
+            .context("Missing parent of crate build/out dir")?
+            .parent()
+            .context("Missing parent of crate build dir")?
+            .parent()
+            .context("Missing parent of build dir")?
+            .join("deps");
+
+        write_log_line(
+            &log_dir,
+            CacheLogLine::PushedBuildScriptOutputs(PushBuildScriptOutputsEvent {
+                crate_unit_name: crate_unit_name.to_owned(),
+                copied_at: Utc::now(),
+                copied_from: "local cache".to_string(),
+                did_mangle_on_push: false,
+                duration_secs: before.elapsed().as_secs_f64(),
+            }),
+        )?;
+
+        Ok(())
+    }
+
+    fn push_build_script_stdout(
+        &self,
+        crate_unit_name: &str,
+        content: &[u8],
+    ) -> anyhow::Result<()> {
+        let stdout_file_name = stdout_file_name(crate_unit_name);
+        let stdout_path = self.root.join(&stdout_file_name);
+
+        let mut stdout_file = File::create(stdout_path)
+            .with_context(|| format!("Failed to create \"{stdout_file_name}\" file for writing"))?;
+        stdout_file
+            .write_all(content)
+            .context("Failed to write stdout data to file")?;
+
+        Ok(())
+    }
+
+    fn push_build_script_stderr(
+        &self,
+        crate_unit_name: &str,
+        content: &[u8],
+    ) -> anyhow::Result<()> {
+        let stderr_file_name = stderr_file_name(crate_unit_name);
+        let stderr_path = self.root.join(&stderr_file_name);
+
+        let mut stderr_file = File::create(stderr_path)
+            .with_context(|| format!("Failed to create \"{stderr_file_name}\" file for writing"))?;
+        stderr_file
+            .write_all(content)
+            .context("Failed to write stderr data to file")?;
+
+        Ok(())
+    }
+
+    fn pull_build_script_stdout(&self, crate_unit_name: &str) -> anyhow::Result<Vec<u8>> {
+        let stdout_file_name = stdout_file_name(crate_unit_name);
+        let stdout_path = self.root.join(&stdout_file_name);
+
+        let content = std::fs::read_to_string(stdout_path)
+            .with_context(|| format!("Failed to read stdout data file \"{stdout_file_name}\"."))?;
+        Ok(content.into_bytes())
+    }
+
+    fn pull_build_script_stderr(&self, crate_unit_name: &str) -> anyhow::Result<Vec<u8>> {
+        let stderr_file_name = stderr_file_name(crate_unit_name);
+        let stderr_path = self.root.join(&stderr_file_name);
+
+        let content = std::fs::read_to_string(stderr_path)
+            .with_context(|| format!("Failed to read stderr data file \"{stderr_file_name}\"."))?;
+        Ok(content.into_bytes())
+    }
+}
+
+fn stdout_file_name(crate_unit_name: &str) -> String {
+    // It doesn't really matter, but follow the Cargo convention
+    // of calling this "output". (I assume they started with just stdout
+    // and then added stderr later.)
+    format!("{crate_unit_name}-output.txt")
+}
+
+fn stderr_file_name(crate_unit_name: &str) -> String {
+    format!("{crate_unit_name}-stderr.txt")
 }
