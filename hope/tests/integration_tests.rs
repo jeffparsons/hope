@@ -6,7 +6,7 @@ use std::{
 use cache_log::{read_log, CacheLogLine};
 use tempfile::{tempdir, TempDir};
 
-const WRAPPER_PATH: &str = env!("CARGO_BIN_EXE_wrapper");
+const WRAPPER_PATH: &str = env!("CARGO_BIN_EXE_hope");
 
 // Simple case where the wrapper shouldn't do anything.
 #[test]
