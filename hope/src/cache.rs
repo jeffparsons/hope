@@ -3,6 +3,7 @@ use std::{
     fs::File,
     io::Write,
     path::{Path, PathBuf},
+    str::FromStr,
     time::Instant,
 };
 
@@ -12,6 +13,7 @@ use cache_log::{
     PushBuildScriptOutputsEvent, PushCrateOutputsEvent,
 };
 use chrono::Utc;
+use directories::ProjectDirs;
 
 use crate::{CrateType, OutputType};
 
@@ -72,8 +74,31 @@ pub struct LocalCache {
 }
 
 impl LocalCache {
+    /// This does _not_ create the cache dir for you.
+    ///
+    /// If you want that, then call `from_env`, which ensures
+    /// the directory exists.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    pub fn from_env() -> anyhow::Result<Self> {
+        let cache_dir = Self::dir_from_env().context("Couldn't infer cache directory")?;
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir).context("Failed to create cache dir")?;
+        }
+        Ok(Self::new(cache_dir))
+    }
+
+    fn dir_from_env() -> anyhow::Result<PathBuf> {
+        if let Ok(dir_from_env) = std::env::var("HOPE_CACHE_DIR") {
+            return PathBuf::from_str(&dir_from_env)
+                .context("Invalid path in 'HOPE_CACHE_DIR' environment variable");
+        }
+        // Default to a directory based on OS-specific standard.
+        let project_dirs =
+            ProjectDirs::from("", "", "Hope").context("Couldn't get project dirs for Hope")?;
+        Ok(project_dirs.cache_dir().to_owned())
     }
 }
 

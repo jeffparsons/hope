@@ -191,7 +191,7 @@ impl Package {
         command.env("RUSTC_WRAPPER", WRAPPER_PATH);
 
         // Pass through the cache dir we're using for this test.
-        command.env("WRAPPER_HAX_CACHE_DIR", self.cache_dir.to_str().unwrap());
+        command.env("HOPE_CACHE_DIR", self.cache_dir.to_str().unwrap());
 
         if std::env::var("HOPE_VERBOSE") == Ok("true".to_string()) {
             command.arg("-v");

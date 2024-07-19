@@ -12,17 +12,6 @@ use anyhow::Context;
 use crate::cache::{Cache, LocalCache};
 
 pub fn run(called_as: &Path) -> anyhow::Result<()> {
-    // TODO: This is copy-pasta; deduplicate it!
-    let cache_dir = std::env::var("WRAPPER_HAX_CACHE_DIR")
-        .context("Missing 'WRAPPER_HAX_CACHE_DIR' env var")?;
-    let cache_dir =
-        PathBuf::from_str(&cache_dir).context("Bad path in 'WRAPPER_HAX_CACHE_DIR' env var")?;
-    if !cache_dir.exists() {
-        // Only attempt to create the directory, but not any parents;
-        // minimises the risk of really big oopsies.
-        std::fs::create_dir(&cache_dir).context("Failed to create cargo-cache-hacks dir")?;
-    }
-
     let out_dir = std::env::var("OUT_DIR").context("OUT_DIR env var not set")?;
     let out_dir = PathBuf::from_str(&out_dir).context("Bad path in OUT_DIR env")?;
 
@@ -38,7 +27,7 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
         .context("Bad UTF-8 in crate build dir name")?;
 
     // Try to pull the out dir from cache.
-    let cache = LocalCache::new(cache_dir);
+    let cache = LocalCache::from_env()?;
     if cache
         .pull_build_script_out_dir(&out_dir, crate_unit_name)
         // REVISIT: Care about the specific error when pulling.

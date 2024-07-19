@@ -163,16 +163,6 @@ fn main() -> anyhow::Result<()> {
         return run_real_rustc(&rustc_path, pass_through_args);
     }
 
-    let cache_dir = std::env::var("WRAPPER_HAX_CACHE_DIR")
-        .context("Missing 'WRAPPER_HAX_CACHE_DIR' env var")?;
-    let cache_dir =
-        PathBuf::from_str(&cache_dir).context("Bad path in 'WRAPPER_HAX_CACHE_DIR' env var")?;
-    if !cache_dir.exists() {
-        // Only attempt to create the directory, but not any parents;
-        // minimises the risk of really big oopsies.
-        std::fs::create_dir(&cache_dir).context("Failed to create cargo-cache-hacks dir")?;
-    }
-
     let crate_name = args
         .crate_name
         .clone()
@@ -214,7 +204,7 @@ fn main() -> anyhow::Result<()> {
     let out_dir = PathBuf::from_str(&out_dir).context("Invalid path in out-dir argument")?;
 
     // Try to pull from the cache.
-    let cache = LocalCache::new(cache_dir);
+    let cache = LocalCache::from_env()?;
     if cache
         .pull_crate_outputs(&out_dir, &crate_unit_name, &crate_types, &output_types)
         // REVISIT: Care about the specific error when pulling.
