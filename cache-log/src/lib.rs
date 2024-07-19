@@ -8,14 +8,16 @@ use anyhow::Context;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum CacheLogLine {
-    Pulled(PullEvent),
-    Pushed(PushEvent),
+    PulledCrateOutputs(PullCrateOutputsEvent),
+    PushedCrateOutputs(PushCrateOutputsEvent),
+    PulledBuildScriptOutputs(PullBuildScriptOutputsEvent),
+    PushedBuildScriptOutputs(PushBuildScriptOutputsEvent),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PullEvent {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PullCrateOutputsEvent {
     pub crate_unit_name: String,
     pub copied_at: chrono::DateTime<Utc>,
     // Free-form description of where it came from;
@@ -27,8 +29,34 @@ pub struct PullEvent {
     pub duration_secs: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PushEvent {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PushCrateOutputsEvent {
+    pub crate_unit_name: String,
+    pub copied_at: chrono::DateTime<Utc>,
+    // Free-form description of where it went to;
+    // may differ depending on the cache implementation.
+    pub copied_from: String,
+    // Were modifications made to the file during push?
+    pub did_mangle_on_push: bool,
+    // How long did it take to copy, mangle, etc.?
+    pub duration_secs: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PullBuildScriptOutputsEvent {
+    pub crate_unit_name: String,
+    pub copied_at: chrono::DateTime<Utc>,
+    // Free-form description of where it came from;
+    // may differ depending on the cache implementation.
+    pub copied_from: String,
+    // Were modifications made to the file during pull?
+    pub did_mangle_on_pull: bool,
+    // How long did it take to copy, mangle, etc.?
+    pub duration_secs: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PushBuildScriptOutputsEvent {
     pub crate_unit_name: String,
     pub copied_at: chrono::DateTime<Utc>,
     // Free-form description of where it went to;

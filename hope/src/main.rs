@@ -1,3 +1,4 @@
+mod build_script;
 mod cache;
 
 use std::collections::HashSet;
@@ -7,6 +8,7 @@ use std::time::Instant;
 use std::{process::Command, str::FromStr};
 
 use anyhow::Context;
+use build_script::append_moved_build_script_suffix;
 use cache::{Cache, LocalCache};
 use clap::Parser;
 
@@ -111,14 +113,24 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args();
+    let mut args = std::env::args().peekable();
 
     let mut args_to_parse: Vec<String> = Vec::new();
 
-    args_to_parse.push(
-        args.next()
-            .context("Missing argument for path to this executable")?,
-    );
+    let called_as = args
+        .next()
+        .context("Missing argument for path to this executable")?;
+
+    // TODO: Non-hack way to get this! :P
+    if called_as.contains("/build/") && args.peek().is_none() {
+        // Looks like we're being run as a build script, because we moved
+        // the actual build script out of the way and replaced it with a symlink
+        // to this binary.
+        let called_as = PathBuf::from_str(&called_as).context("Bad path in argv[0]")?;
+        return build_script::run(&called_as);
+    }
+
+    args_to_parse.push(called_as);
 
     let rustc_path = args
         .next()
@@ -204,24 +216,78 @@ fn main() -> anyhow::Result<()> {
     // Try to pull from the cache.
     let cache = LocalCache::new(cache_dir);
     if cache
-        .pull(&out_dir, &crate_unit_name, &crate_types, &output_types)
-        .is_ok()
+        .pull_crate_outputs(&out_dir, &crate_unit_name, &crate_types, &output_types)
+        // REVISIT: Care about the specific error when pulling.
+        .is_err()
     {
-        // We got it from cache; we're done!
-        return Ok(());
+        // We weren't able to pull from cache, so we have to ask the real rustc to build it.
+        run_real_rustc(&rustc_path, pass_through_args)?;
+
+        // Attempt to push the result to cache.
+        cache
+            .push_crate_outputs(&out_dir, &crate_unit_name, &crate_types, &output_types)
+            .context("Failed to push to cache")?;
     }
-    // REVISIT: Care about the specific error.
 
-    // DEBUG
-    // dbg!(&pass_through_args);
+    // TODO: Better way of checking this. ;)
+    if out_dir.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .expect("Bad string in out dir component")
+            == "build"
+    }) {
+        // This looks like a build script.
+        //
+        // Replace it with a symlink to this binary so that we can
+        // attempt to pull the build script's output from cache, too.
+        //
+        // REVISIT: In future it would be nice to avoid running build
+        // scripts or pulling their output altogether if we're not
+        // actually going to build the main crate. But that's a little
+        // bit fiddly because of build script outputs
+        // (https://doc.rust-lang.org/cargo/reference/build-scripts.html#outputs-of-the-build-script)
+        // so we'll come back to that later.
+        //
+        // TODO: Cargo seems to copy, e.g., "build_script_main" to
+        // "build-script-main" and run it from there. I'm just replacing
+        // the former right now (on the assumption that what I replace it
+        // with will get copied just fine) but I should probably understand why
+        // both exist.
+        //
+        // TODO: Apply binary extension here if relevant.
+        let build_script_path = out_dir.join(&crate_unit_name);
+        let moved_build_script_path = append_moved_build_script_suffix(&build_script_path)
+            .context("Failed to append moved build script path suffix")?;
+        std::fs::rename(&build_script_path, &moved_build_script_path)
+            .context("Failed to move build script out of the way")?;
 
-    // We weren't able to pull from cache, so we have to ask the real rustc to build it.
-    run_real_rustc(&rustc_path, pass_through_args)?;
+        // Replace it with a copy of this binary;
+        // we will masquerade as a build script. Muahahaha.
+        //
+        // NOTE: We do not use a symlink here because otherwise Cargo
+        // will copy the _target_ of the symlink, which results in the
+        // mtime being older than the build attempt. This causes spurious rebuilds.
+        let current_exe = std::env::current_exe().context("Failed to get path to current exe")?;
+        std::fs::copy(current_exe, &build_script_path)
+            .context("Failed to replace build script with a copy of 'hope'")?;
+        // Bump the copy's mtime. In my testing on macOS,
+        // this seems to be necessary or the old mtime gets copied across
+        // causing spurious rebuilds!
+        filetime::set_file_mtime(&build_script_path, filetime::FileTime::now())
+            .with_context(|| format!("Failed to update mtime for {build_script_path:?}."))?;
 
-    // Attempt to push the result to cache.
-    cache
-        .push(&out_dir, &crate_unit_name, &crate_types, &output_types)
-        .context("Failed to push to cache")?;
+        // Make a symlink to the real buildscript,
+        // with a predictable name.
+        //
+        // TODO: I'd prefer to not have to do this, but I'm not sure
+        // how to accurately infer the name from the kebab-case "build-script-build"
+        // that we get called as.
+
+        let real_build_script_symlink_path = out_dir.join("real-build-script");
+        std::os::unix::fs::symlink(moved_build_script_path, real_build_script_symlink_path)
+            .context("Failed to create symlink to the real build script")?;
+    }
 
     Ok(())
 }
