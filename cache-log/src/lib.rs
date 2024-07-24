@@ -1,19 +1,21 @@
 use std::{
     fs::File,
-    io::{BufWriter, Write as _},
+    io::{BufRead, BufReader, BufWriter, Write as _},
     path::Path,
 };
 
 use anyhow::Context;
 use chrono::Utc;
+use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
+
+const LOG_FILE_NAME: &str = "hope-log.jsonl";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum CacheLogLine {
     PulledCrateOutputs(PullCrateOutputsEvent),
     PushedCrateOutputs(PushCrateOutputsEvent),
-    PulledBuildScriptOutputs(PullBuildScriptOutputsEvent),
-    PushedBuildScriptOutputs(PushBuildScriptOutputsEvent),
+    RanBuildScript(BuildScriptRunEvent),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,9 +25,7 @@ pub struct PullCrateOutputsEvent {
     // Free-form description of where it came from;
     // may differ depending on the cache implementation.
     pub copied_from: String,
-    // Were modifications made to the file during pull?
-    pub did_mangle_on_pull: bool,
-    // How long did it take to copy, mangle, etc.?
+    // How long did it take to copy from cache?
     pub duration_secs: f64,
 }
 
@@ -36,44 +36,27 @@ pub struct PushCrateOutputsEvent {
     // Free-form description of where it went to;
     // may differ depending on the cache implementation.
     pub copied_from: String,
-    // Were modifications made to the file during push?
-    pub did_mangle_on_push: bool,
-    // How long did it take to copy, mangle, etc.?
+    // How long did it take to copy to cache?
     pub duration_secs: f64,
 }
 
+// TODO: The existence of this kinda suggests that this log
+// should probably not be associated with a specific cache,
+// but be global by default (with ability to override).
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PullBuildScriptOutputsEvent {
-    pub crate_unit_name: String,
-    pub copied_at: chrono::DateTime<Utc>,
-    // Free-form description of where it came from;
-    // may differ depending on the cache implementation.
-    pub copied_from: String,
-    // Were modifications made to the file during pull?
-    pub did_mangle_on_pull: bool,
-    // How long did it take to copy, mangle, etc.?
-    pub duration_secs: f64,
+pub struct BuildScriptRunEvent {
+    // TODO: Lots of other details
+    pub ran_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PushBuildScriptOutputsEvent {
-    pub crate_unit_name: String,
-    pub copied_at: chrono::DateTime<Utc>,
-    // Free-form description of where it went to;
-    // may differ depending on the cache implementation.
-    pub copied_from: String,
-    // Were modifications made to the file during push?
-    pub did_mangle_on_push: bool,
-    // How long did it take to copy, mangle, etc.?
-    pub duration_secs: f64,
-}
-
-pub fn write_log_line(out_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<()> {
+pub fn write_log_line(cache_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<()> {
     let file = File::options()
         .create(true)
         .append(true)
-        .open(out_dir.join("cache-hacks.log"))?;
-    let mut writer = BufWriter::new(file);
+        .open(cache_dir.join(LOG_FILE_NAME))?;
+    let mut file = RwLock::new(file);
+    let mut write_guard = file.write()?;
+    let mut writer = BufWriter::new(&mut *write_guard);
     serde_json::to_writer(&mut writer, &log_line)?;
     writeln!(&mut writer)?;
     writer.flush()?;
@@ -81,14 +64,17 @@ pub fn write_log_line(out_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<
     Ok(())
 }
 
-pub fn read_log(out_dir: &Path) -> anyhow::Result<Vec<CacheLogLine>> {
+pub fn read_log(cache_dir: &Path) -> anyhow::Result<Vec<CacheLogLine>> {
     let mut log = Vec::new();
-    for line in std::fs::read_to_string(out_dir.join("cache-hacks.log"))
-        .context("Failed to read log file")?
-        .lines()
-    {
+    let file = File::open(cache_dir.join(LOG_FILE_NAME))?;
+    let mut file = RwLock::new(file);
+    let mut read_guard = file.write()?;
+    let reader = BufReader::new(&mut *read_guard);
+
+    for line in reader.lines() {
+        let line = line?;
         log.push(
-            serde_json::from_str(line)
+            serde_json::from_str(&line)
                 .with_context(|| format!("Failed to deserialize log line:\n{line}"))?,
         );
     }
