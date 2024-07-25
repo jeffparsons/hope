@@ -291,8 +291,12 @@ fn main() -> anyhow::Result<()> {
         // files and avoid having to recompute a bunch of stuff
         // from scratch when deciding whether to build crates again.
         let dot_d_path = build_script_path.with_extension("d");
-        let mut dot_d_file =
-            File::create_new(dot_d_path).context("Failed to create fake '.d' file")?;
+        // let mut dot_d_file =
+        //     File::create_new(dot_d_path).context("Failed to create fake '.d' file")?;
+        // TEMP: Allow it to overwrite the file while I'm testing getting the other stuff right.
+        // (I don't want it to fail on this step all the time right now,
+        // and I'm not even convinced that I don't need to allow this...)
+        let mut dot_d_file = File::create(dot_d_path).context("Failed to create fake '.d' file")?;
         let build_script_path_str = build_script_path
             .to_str()
             .context("Bad UTF-8 in build script path")?;
@@ -343,7 +347,69 @@ fn main() -> anyhow::Result<()> {
                     || format!("Failed to update mtime for arrival file {file_name:?}."),
                 )?;
 
-                // TODO: Path mangling in '.d' files, etc.!
+                if *output_defn == OutputDefn::DepInfo {
+                    // We want to remove most stuff from dep info files because the
+                    // relevant files won't actually exist!
+                    let dep_info_text = std::fs::read_to_string(&arrival_path)
+                        .context("Failed to read received dep info file")?;
+                    let mut file = File::create(&arrival_path)?;
+                    for line in dep_info_text.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            // Write it out unmodified.
+                            writeln!(file, "{}", line)?;
+                            continue;
+                        }
+
+                        // TODO: Handle escaped spaces etc. in file names!
+                        let (left_side, rest) = line
+                            .split_once(':')
+                            .with_context(|| format!("Couldn't find ':' in line: {line}"))?;
+
+                        // TODO: Proper way to determine that it's in the build dir!
+                        // We should have enough information in context,
+                        // but we're not doing the absolute path replacement yet
+                        // so I'm just going with this dirty hack for right now.
+                        if left_side.contains("/build/") {
+                            // Skip the whole line.
+                            continue;
+                        } else {
+                            write!(file, "{left_side}:")?;
+                        }
+
+                        // There will be a space after the ':' if there are actually any deps.
+                        //
+                        // TODO: Handle escaped spaces etc. in file names!
+                        let deps = rest
+                            .trim()
+                            .split(' ')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned);
+
+                        for dep in deps {
+                            // TODO: Proper way to determine that it's in the build dir!
+                            // We should have enough information in context,
+                            // but we're not doing the absolute path replacement yet
+                            // so I'm just going with this dirty hack for right now.
+                            if !dep.contains("/build/") {
+                                // It's not in the build dir, so we can depend on it
+                                // without it causing Cargo to constantly rebuild.
+
+                                // TODO: Handle re-escaping here, if we end up dealing
+                                // with an unescaped value here.
+                                // (I should probably split this out as a module again
+                                // and actually parse the file properly.)
+                                write!(file, " {dep}")?;
+                            }
+                        }
+
+                        // Finish the line.
+                        writeln!(file)?;
+                    }
+
+                    // TODO: Also replace placeholder paths with the relevant absolute paths
+                    // for our target dir.
+                }
 
                 let path_in_out_dir = out_dir.join(&file_name);
                 std::fs::copy(arrival_path, &path_in_out_dir).with_context(|| {
@@ -367,7 +433,8 @@ fn main() -> anyhow::Result<()> {
                 let path_in_out_dir = out_dir.join(&file_name);
                 let departure_path = departure_dir.path().join(&file_name);
 
-                // TODO: Path mangling in '.d' files, etc.!
+                // TODO: Replace absolute paths in '.d' files with a placeholder that we can then
+                // replace again when pulling.
 
                 std::fs::copy(path_in_out_dir, departure_path).with_context(|| {
                     format!("Failed to copy file {file_name:?} from target directory to departure directory.")

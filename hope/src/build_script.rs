@@ -94,22 +94,30 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
     // and have committed to _not_ building anything ourselves,
     // so fail catastrophically if we can't get it.
     let cache = LocalCache::from_env()?;
-    let build_script_stdout = cache
+    let build_script_stdout_bytes = cache
         .get_build_script_stdout_by_build_script_crate_metadata_hash(
             build_script_crate_metadata_hash,
         )
         .context("Failed to get build script stdout from cache")?;
-
-    // TODO: We should filter _here_ (but save the real, full output in the cache
-    // for easier debugging / not poisoning / whatever) to get rid of any "rebuild if"
-    // directives; I don't _ever_ want to rebuild the build script if we pulled
-    // the crate output from cache!
+    let build_script_stdout = String::from_utf8(build_script_stdout_bytes)
+        .context("Build script output contained bad UTF-8")?;
 
     // Print what we found to stdout to make Cargo invoke rustc with
     // the right arguments for the real build. (Most of them don't matter,
     // but some things get a bit wonky if we don't emit the same thing
     // that the real build script does.)
-    std::io::stdout().write_all(&build_script_stdout)?;
+    for line in build_script_stdout.lines() {
+        if line.starts_with("cargo:rerun-if-") {
+            // Skip output lines that would cause Cargo to consider
+            // the build script as dirty just because we don't actually run it.
+            //
+            // (We store the full output in the cache because it's easier for debugging
+            // and tweaking the rules here if we do it on the way _out_.)
+            continue;
+        }
+
+        println!("{}", line);
+    }
 
     // Don't bother printing the real stderr; it isn't used by Cargo.
     // Instead, print something to help people if they end up debugging
