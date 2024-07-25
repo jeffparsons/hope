@@ -450,10 +450,16 @@ fn main() -> anyhow::Result<()> {
                     .parent()
                     .context("Out dir missing parent directory")?;
                 let build_script_stdout_path_in_build_dir = build_dir.join("output");
-                let build_script_crate_metadata_hash = std::fs::read_to_string(
-                    build_dir.join(BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME),
-                )
-                .context("Missing build script crate metadata hash file")?;
+                let build_script_crate_metadata_hash_file_path =
+                    build_dir.join(BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME);
+                let build_script_crate_metadata_hash =
+                    std::fs::read_to_string(&build_script_crate_metadata_hash_file_path)
+                        .with_context(|| {
+                            format!(
+                                "Missing build script crate metadata hash file {:?}",
+                                build_script_crate_metadata_hash_file_path
+                            )
+                        })?;
                 // Make sure we don't bring any trailing newlines or whatever along for the ride.
                 let build_script_crate_metadata_hash =
                     build_script_crate_metadata_hash.trim().to_owned();
