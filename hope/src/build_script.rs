@@ -1,6 +1,7 @@
 //! Pretending to be a crate's build script
 
 use std::{
+    fs::File,
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -8,39 +9,36 @@ use std::{
 };
 
 use anyhow::Context;
+use cache_log::{write_log_line, BuildScriptRunEvent, CacheLogLine};
+use chrono::Utc;
 
 use crate::cache::{Cache, LocalCache};
 
+pub const BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME: &str =
+    "hope-build-script-crate-metadata-hash";
+
 pub fn run(called_as: &Path) -> anyhow::Result<()> {
-    let out_dir = std::env::var("OUT_DIR").context("OUT_DIR env var not set")?;
-    let out_dir = PathBuf::from_str(&out_dir).context("Bad path in OUT_DIR env")?;
-
-    // TODO: Some more assertions to make sure that the dir looks right,
-    // and is actually a directory, etc.!
-    let crate_build_dir = out_dir
+    let build_script_build_dir = called_as
         .parent()
-        .context("Out dir missing parent directory")?;
-    let crate_unit_name = crate_build_dir
-        .file_name()
-        .context("Crate build dir missing file name")?
+        .context("Build script didn't have parent dir")?;
+    let (_, build_script_crate_metadata_hash) = build_script_build_dir
         .to_str()
-        .context("Bad UTF-8 in crate build dir name")?;
+        .context("Bad UTF-8 in build dir")?
+        .rsplit_once('-')
+        .with_context(|| {
+            format!(
+                "Build script build dir {:?} had unexpected format",
+                build_script_build_dir
+            )
+        })?;
 
-    // Try to pull the out dir from cache.
-    let cache = LocalCache::from_env()?;
-    if cache
-        .pull_build_script_out_dir(&out_dir, crate_unit_name)
-        // REVISIT: Care about the specific error when pulling.
-        .is_err()
-    {
-        // We weren't able to pull from the cache, so we need to
-        // run the real build script.
+    // TODO: See comments where this is created about wanting to not do "real-build-script" symlink.
+    let real_build_script_symlink_path = build_script_build_dir.join("real-build-script");
+    if real_build_script_symlink_path.exists() {
+        // We previously created a symlink to the real build script,
+        // which we only do if we intend to run it.
         //
-        // TODO: See comments where this is created about wanting to not do "real-build-script" symlink.
-        let build_script_build_dir = called_as
-            .parent()
-            .context("Build script didn't have parent dir")?;
-        let real_build_script_symlink_path = build_script_build_dir.join("real-build-script");
+        // So... run the real build script.
         let output = Command::new(&real_build_script_symlink_path)
             .args(std::env::args())
             .envs(std::env::vars())
@@ -60,30 +58,63 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
             );
         }
 
-        cache
-            .push_build_script_out_dir(&out_dir, crate_unit_name)
-            .context("Failed to push build script out dir")?;
+        let cache_dir =
+            LocalCache::dir_from_env().context("Failed to get local cache dir from environment")?;
+        write_log_line(
+            &cache_dir,
+            CacheLogLine::RanBuildScript(BuildScriptRunEvent { ran_at: Utc::now() }),
+        )?;
 
-        // Tee child process stdout and stderr to cache.
-        // (We need to emit them, too, to talk to Cargo.)
+        // Forward child process stdout and stderr.
+        // (We need to emit them, to instruct Cargo what to do for the main crate.)
         std::io::stdout().write_all(&output.stdout)?;
-        cache
-            .push_build_script_stdout(crate_unit_name, &output.stdout)
-            .context("Failed to push build script stdout")?;
         std::io::stdout().write_all(&output.stderr)?;
-        cache
-            .push_build_script_stderr(crate_unit_name, &output.stderr)
-            .context("Failed to push build script stderr")?;
-    } else {
-        let stdout = cache
-            .pull_build_script_stdout(crate_unit_name)
-            .context("Failed to pull build script stdout")?;
-        std::io::stdout().write_all(&stdout)?;
-        let stderr = cache
-            .pull_build_script_stderr(crate_unit_name)
-            .context("Failed to pull build script stderr")?;
-        std::io::stderr().write_all(&stderr)?;
+
+        // And finally we need to leave a reference to the build script crate's
+        // metadata hash so that we can later detect that there's no need to build it!
+        // This will get pushed to the cache after the main crate build.
+        let out_dir = std::env::var("OUT_DIR").context("OUT_DIR env var not set")?;
+        let out_dir = PathBuf::from_str(&out_dir).context("Bad path in OUT_DIR env")?;
+        let build_dir = out_dir
+            .parent()
+            .context("Out dir missing parent directory")?;
+
+        let mut build_script_crate_metadata_hash_file =
+            File::create_new(build_dir.join(BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME))
+                .context("Failed to create file for build script crate metadata hash")?;
+        build_script_crate_metadata_hash_file
+            .write_all(build_script_crate_metadata_hash.as_bytes())?;
+
+        return Ok(());
     }
+
+    // Try to get the real build script's stdout from cache.
+    //
+    // We have already verified at this point that we can find it,
+    // and have committed to _not_ building anything ourselves,
+    // so fail catastrophically if we can't get it.
+    let cache = LocalCache::from_env()?;
+    let build_script_stdout = cache
+        .get_build_script_stdout_by_build_script_crate_metadata_hash(
+            build_script_crate_metadata_hash,
+        )
+        .context("Failed to get build script stdout from cache")?;
+
+    // TODO: We should filter _here_ (but save the real, full output in the cache
+    // for easier debugging / not poisoning / whatever) to get rid of any "rebuild if"
+    // directives; I don't _ever_ want to rebuild the build script if we pulled
+    // the crate output from cache!
+
+    // Print what we found to stdout to make Cargo invoke rustc with
+    // the right arguments for the real build. (Most of them don't matter,
+    // but some things get a bit wonky if we don't emit the same thing
+    // that the real build script does.)
+    std::io::stdout().write_all(&build_script_stdout)?;
+
+    // Don't bother printing the real stderr; it isn't used by Cargo.
+    // Instead, print something to help people if they end up debugging
+    // problems caused by Hope — just to hint at what's going on.
+    eprintln!("Fake build script by Hope; real build script not run because we intend to pull the main crate output from cache.");
 
     Ok(())
 }
