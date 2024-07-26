@@ -40,8 +40,6 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
         //
         // So... run the real build script.
         let output = Command::new(&real_build_script_symlink_path)
-            .args(std::env::args())
-            .envs(std::env::vars())
             .output()
             .with_context(|| {
                 format!(
