@@ -1,4 +1,6 @@
 use std::{
+    fs::File,
+    io::Write as _,
     path::{Path, PathBuf},
     str::FromStr,
     time::Instant,
@@ -15,33 +17,6 @@ use crate::OutputDefn;
 /// content to be stored/retrieved (e.g. changing paths);
 /// that is the responsibility of the caller.
 pub trait Cache {
-    /// Attempt to retrieve the standard output of a build script run,
-    /// looking it up by the build script's metadata hash.
-    ///
-    /// (We don't have a great source for the main crate name when we
-    /// need to look this up, so just go by the metadata hash alone.)
-    ///
-    /// Cargo appears to alter the build script metadata hash
-    /// in response to pretty much everything that affects the
-    /// main crate's metadata hash, so we can use this early
-    /// to determine whether to bother building a build script;
-    /// if the cache has a matching crate then we should be able
-    /// to pull the end result later and neither build nor run
-    /// the build script.
-    ///
-    /// N.B. this is different to the metadata hash of the build script _run_
-    /// "work unit" in Cargo; we use the metadata of the build script itself
-    /// because we know that earlier.
-    ///
-    /// If this is present, then we can assume that the whole crate
-    /// output is cached, so we can just emit the cached stdout to control
-    /// arguments to `rustc` for the build of the main crate, but without
-    /// actually building or running the build script itself.
-    fn get_build_script_stdout_by_build_script_crate_metadata_hash(
-        &self,
-        build_script_crate_metadata_hash: &str,
-    ) -> anyhow::Result<Vec<u8>>;
-
     /// Unit name is of the form "{crate name}-{metadata hash}".
     ///
     /// The `arrival_dir` should be a temporary directory.
@@ -64,8 +39,28 @@ pub trait Cache {
         &self,
         unit_name: &str,
         output_defns: &[OutputDefn],
-        maybe_build_script_crate_metadata_hash: Option<String>,
         departure_dir: &Path,
+    ) -> anyhow::Result<()>;
+
+    /// Get stdout of a build script execution from the cache.
+    ///
+    /// (We don't have a great source for the main crate name when we
+    /// need to look this up, so just go by the execution's metadata hash alone.)
+    ///
+    /// If this is present, then we can assume that the whole crate
+    /// output is cached, so we can just emit the cached stdout to control
+    /// arguments to `rustc` for the build of the main crate, but without
+    /// actually building or running the build script itself.
+    fn get_build_script_stdout(
+        &self,
+        build_script_execution_metadata_hash: &str,
+    ) -> anyhow::Result<Vec<u8>>;
+
+    /// Put stdout of a build script execution into the cache.
+    fn put_build_script_stdout(
+        &self,
+        build_script_execution_metadata_hash: &str,
+        stdout: &[u8],
     ) -> anyhow::Result<()>;
 }
 
@@ -103,18 +98,6 @@ impl LocalCache {
 }
 
 impl Cache for LocalCache {
-    fn get_build_script_stdout_by_build_script_crate_metadata_hash(
-        &self,
-        build_script_crate_metadata_hash: &str,
-    ) -> anyhow::Result<Vec<u8>> {
-        let stdout_file_name = build_script_stdout_file_name(build_script_crate_metadata_hash);
-        let stdout_path = self.root.join(&stdout_file_name);
-        let content = std::fs::read_to_string(stdout_path).with_context(|| {
-            format!("Failed to read build script stdout file \"{stdout_file_name}\".")
-        })?;
-        Ok(content.into_bytes())
-    }
-
     fn pull_crate(
         &self,
         unit_name: &str,
@@ -150,23 +133,12 @@ impl Cache for LocalCache {
         &self,
         unit_name: &str,
         output_defns: &[OutputDefn],
-        maybe_build_script_crate_metadata_hash: Option<String>,
         departure_dir: &Path,
     ) -> anyhow::Result<()> {
         let before = Instant::now();
 
         for output_defn in output_defns {
             let file_name = output_defn.file_name(unit_name);
-            let from_path = departure_dir.join(&file_name);
-            let to_path = self.root.join(&file_name);
-            // Copy it to the cache dir.
-            std::fs::copy(from_path, to_path)
-                .with_context(|| format!("Failed to copy file {file_name:?} to local cache."))?;
-        }
-
-        if let Some(build_script_crate_metadata_hash) = maybe_build_script_crate_metadata_hash {
-            // Push the build script output!
-            let file_name = build_script_stdout_file_name(&build_script_crate_metadata_hash);
             let from_path = departure_dir.join(&file_name);
             let to_path = self.root.join(&file_name);
             // Copy it to the cache dir.
@@ -187,14 +159,42 @@ impl Cache for LocalCache {
 
         Ok(())
     }
+
+    fn get_build_script_stdout(
+        &self,
+        build_script_execution_metadata_hash: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let stdout_file_name = build_script_stdout_file_name(build_script_execution_metadata_hash);
+        let stdout_path = self.root.join(&stdout_file_name);
+        let content = std::fs::read_to_string(stdout_path).with_context(|| {
+            format!("Failed to read build script stdout file \"{stdout_file_name}\".")
+        })?;
+        Ok(content.into_bytes())
+    }
+
+    fn put_build_script_stdout(
+        &self,
+        build_script_execution_metadata_hash: &str,
+        stdout: &[u8],
+    ) -> anyhow::Result<()> {
+        let stdout_file_name = build_script_stdout_file_name(build_script_execution_metadata_hash);
+        let stdout_path = self.root.join(stdout_file_name);
+
+        let mut stdout_file =
+            File::create(stdout_path).context("Failed to create file for build script stdout")?;
+        stdout_file
+            .write_all(stdout)
+            .context("Failed to write build script stdout to file")?;
+        Ok(())
+    }
 }
 
-// We don't have a great source for the main crate name when we
-// need to look this up, so just go by the metadata hash alone.
-pub fn build_script_stdout_file_name(build_script_crate_metadata_hash: &str) -> String {
+/// We don't have a great source for the main crate name when we
+/// need to look this up, so just go by the execution's metadata hash alone.
+pub fn build_script_stdout_file_name(build_script_execution_metadata_hash: &str) -> String {
     // NOTE: This is different to what Cargo calls it ("output").
     // I flip-flopped a bit on this, but ultimately decided that
     // I preferred calling it this in my own file names to clarify exactly what it is.
     // (Yeah, I know: big deal, right?)
-    format!("build-script-{build_script_crate_metadata_hash}-stdout.txt")
+    format!("build-script-{build_script_execution_metadata_hash}-stdout.txt")
 }
