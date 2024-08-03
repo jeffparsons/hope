@@ -4,7 +4,9 @@ use std::{
     process::{Command, Stdio},
 };
 
-use cache_log::{BuildScriptRunEvent, CacheLogLine, PullCrateOutputsEvent, PushCrateOutputsEvent};
+use hope_cache_log::{
+    BuildScriptRunEvent, CacheLogLine, PullCrateOutputsEvent, PushCrateOutputsEvent,
+};
 use tempfile::{tempdir, TempDir};
 
 const WRAPPER_PATH: &str = env!("CARGO_BIN_EXE_hope");
@@ -235,7 +237,7 @@ impl CacheDir {
     }
 
     pub fn read_log(&self) -> anyhow::Result<Vec<CacheLogLine>> {
-        cache_log::read_log(self.dir.path())
+        hope_cache_log::read_log(self.dir.path())
     }
 }
 

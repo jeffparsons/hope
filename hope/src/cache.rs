@@ -7,9 +7,9 @@ use std::{
 };
 
 use anyhow::Context;
-use cache_log::{write_log_line, CacheLogLine, PullCrateOutputsEvent, PushCrateOutputsEvent};
 use chrono::Utc;
 use directories::ProjectDirs;
+use hope_cache_log::{write_log_line, CacheLogLine, PullCrateOutputsEvent, PushCrateOutputsEvent};
 
 use crate::OutputDefn;
 

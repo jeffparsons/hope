@@ -12,8 +12,8 @@ use std::{
 };
 
 use anyhow::Context;
-use cache_log::{write_log_line, BuildScriptRunEvent, CacheLogLine};
 use chrono::Utc;
+use hope_cache_log::{write_log_line, BuildScriptRunEvent, CacheLogLine};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{Cache, LocalCache};

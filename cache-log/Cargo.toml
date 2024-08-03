@@ -1,8 +1,11 @@
 [package]
-name = "cache-log"
-version = "0.1.0"
+name = "hope-cache-log"
+description = "A WIP rustc wrapper for caching build artifacts. (Support library.)"
+version = "0.0.1"
 edition = "2021"
-publish = false
+authors = ["Jeff Parsons <jeff@parsons.io>"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/jeffparsons/hope"
 
 [dependencies]
 anyhow = "1"
