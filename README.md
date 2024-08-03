@@ -2,10 +2,13 @@
 
 A WIP `rustc` wrapper for caching build artifacts.
 
+Assumes the use of Cargo, and will never support non-Cargo-based workflows.
+
 ## Status
 
 - Incomplete
 - Only minimally tested, so probably buggy
+- Only tested on Linux and macOS, so probably doesn't work on Windows
 - **May eat your data, pets, or other loved ones**
 
 ## How do I use it?
