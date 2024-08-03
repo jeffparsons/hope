@@ -1,4 +1,5 @@
 use std::{
+    env,
     path::PathBuf,
     process::{Command, Stdio},
 };
@@ -45,8 +46,8 @@ fn build_crate_with_simple_dep() {
     // It should not have needed to build again.
     let push_events = filter_push_crate_outputs_events(&log, "anyhow");
     assert_eq!(push_events.len(), 1);
-    let pull_events = filter_push_crate_outputs_events(&log, "anyhow");
-    assert_eq!(pull_events.len(), 1);
+    let pull_events = filter_pull_crate_outputs_events(&log, "anyhow");
+    assert_eq!(pull_events.len(), 0);
 
     let package_b = Package::new(&cache_dir);
     package_b.add("anyhow@1.0.0");
@@ -79,8 +80,8 @@ fn build_dep_with_proc_macro() {
     // It should not have needed to build again.
     let push_events = filter_push_crate_outputs_events(&log, "serde_derive");
     assert_eq!(push_events.len(), 1);
-    let pull_events = filter_push_crate_outputs_events(&log, "serde_derive");
-    assert_eq!(pull_events.len(), 1);
+    let pull_events = filter_pull_crate_outputs_events(&log, "serde_derive");
+    assert_eq!(pull_events.len(), 0);
 
     let package_b = Package::new(&cache_dir);
     package_b.add("serde_derive@1.0.0");
@@ -118,8 +119,8 @@ fn build_dep_with_build_script() {
     // It should not have needed to build again.
     let push_events = filter_push_crate_outputs_events(&log, "typenum");
     assert_eq!(push_events.len(), 1);
-    let pull_events = filter_push_crate_outputs_events(&log, "typenum");
-    assert_eq!(pull_events.len(), 1);
+    let pull_events = filter_pull_crate_outputs_events(&log, "typenum");
+    assert_eq!(pull_events.len(), 0);
 
     // There should not have been any more build script runs.
     let ran_build_script_events = filter_ran_build_script_events(&log);
@@ -181,8 +182,8 @@ fn build_dep_with_build_script_that_builds_stuff() {
     // It should not have needed to build again.
     let push_events = filter_push_crate_outputs_events(&log, "ring");
     assert_eq!(push_events.len(), 1);
-    let pull_events = filter_push_crate_outputs_events(&log, "ring");
-    assert_eq!(pull_events.len(), 1);
+    let pull_events = filter_pull_crate_outputs_events(&log, "ring");
+    assert_eq!(pull_events.len(), 0);
 
     // There should not have been any more build script runs.
     let ran_build_script_events = filter_ran_build_script_events(&log);
@@ -258,6 +259,11 @@ impl Package {
     // that is explicitly "without wrapper".
     fn cargo(&self) -> Command {
         let mut command = Command::new("cargo");
+
+        if env::var("HOPE_TEST_OFFLINE") == Ok("1".to_string()) {
+            command.arg("--offline");
+        }
+
         command.env("RUSTC_WRAPPER", WRAPPER_PATH);
 
         // Pass through the cache dir we're using for this test.

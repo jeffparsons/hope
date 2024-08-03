@@ -2,6 +2,7 @@ mod build_script;
 mod cache;
 
 use std::collections::HashSet;
+use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -10,8 +11,11 @@ use std::time::Instant;
 use std::{process::Command, str::FromStr};
 
 use anyhow::Context;
-use build_script::{append_moved_build_script_suffix, BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME};
-use cache::{build_script_stdout_file_name, Cache, LocalCache};
+use build_script::{
+    append_moved_build_script_suffix, BuildScriptInvocationInfo,
+    BUILD_SCRIPT_INVOCATION_INFO_FILE_NAME,
+};
+use cache::{Cache, LocalCache};
 use clap::Parser;
 use tempfile::tempdir;
 
@@ -175,20 +179,7 @@ fn main() -> anyhow::Result<()> {
         .crate_name
         .clone()
         .context("Missing crate name argument")?;
-    let metadata_hash = args
-        .codegen_options
-        .iter()
-        .filter_map(|codegen_option| {
-            if let FlagOrKvPair::KvPair(kv_pair) = codegen_option {
-                Some(kv_pair)
-            } else {
-                None
-            }
-        })
-        .find(|kv_pair| kv_pair.key == "metadata")
-        .context("Missing metadata codegen option")?
-        .value
-        .clone();
+    // TODO: Dedup this stuff
     let extra_filename = args
         .codegen_options
         .iter()
@@ -203,109 +194,35 @@ fn main() -> anyhow::Result<()> {
         .context("Missing extra-filename codegen option")?
         .value
         .clone();
+    let metadata_hash = args
+        .codegen_options
+        .iter()
+        .filter_map(|codegen_option| {
+            if let FlagOrKvPair::KvPair(kv_pair) = codegen_option {
+                Some(kv_pair)
+            } else {
+                None
+            }
+        })
+        .find(|kv_pair| kv_pair.key == "metadata")
+        .context("Missing metadata codegen option")?
+        .value
+        .clone();
+
+    let cargo_package_name =
+        env::var("CARGO_PKG_NAME").context("Missing 'CARGO_PKG_NAME' env var")?;
 
     let crate_unit_name = format!("{crate_name}{extra_filename}");
 
+    let invoked_timestamp =
+        get_invoked_timestamp_for_crate_build_unit(&out_dir, &cargo_package_name, &metadata_hash)
+            .with_context(|| {
+            format!(
+                "Failed to get invoked timestamp for crate build unit '{crate_unit_name}' (Cargo package '{cargo_package_name}')"
+            )
+        })?;
+
     let cache = LocalCache::from_env()?;
-
-    if out_dir.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .expect("Bad string in out dir component")
-            == "build"
-    }) {
-        // This looks like a build script.
-        //
-        // If the cache contains a copy of the main crate, then we don't
-        // want to waste time building _or_ running the build script.
-        //
-        // If we _do_ have to build the main crate, then we will need a
-        // way to relate the build script crate metadata hash to the main
-        // crate.
-        //
-        // So, either way, we will put a copy of _this_ binary in place
-        // of the real build script, and if we had to build the real
-        // build script we will first move it out of the way and create
-        // a symlink to it so we can run it from within our wrapper.
-
-        // TODO: Cargo seems to copy, e.g., "build_script_main" to
-        // "build-script-main" and run it from there. I'm just replacing
-        // the former right now (on the assumption that what I replace it
-        // with will get copied just fine) but I should probably understand why
-        // both exist.
-        //
-        // TODO: Apply binary extension here if relevant.
-        let build_script_path = out_dir.join(&crate_unit_name);
-
-        if cache
-            .get_build_script_stdout_by_build_script_crate_metadata_hash(&metadata_hash)
-            .is_err()
-        {
-            // TODO: Care about the specific error! This is actually super important
-            // because we need to make sure the build the real build script if
-            // we might end up later needing to build the main crate!
-
-            // Build the build script for real.
-            run_real_rustc(&rustc_path, pass_through_args.clone())?;
-
-            // Now move it out of the way so that we can put a copy
-            // of this exe there as a wrapper.
-            let moved_build_script_path = append_moved_build_script_suffix(&build_script_path)
-                .context("Failed to append moved build script path suffix")?;
-            std::fs::rename(&build_script_path, &moved_build_script_path)
-                .context("Failed to move build script out of the way")?;
-
-            // Make a symlink to the real buildscript,
-            // with a predictable name.
-            //
-            // NOTE: We _must_ only do this if we intend to run it,
-            // because right now we use its existence to decide whether
-            // to run the real build script or attempt to pull from cache.
-            //
-            // TODO: I'd prefer to not have to do this, but I'm not sure
-            // how to accurately infer the name from the kebab-case "build-script-build"
-            // that we get called as.
-            let real_build_script_symlink_path = out_dir.join("real-build-script");
-            std::os::unix::fs::symlink(moved_build_script_path, real_build_script_symlink_path)
-                .context("Failed to create symlink to the real build script")?;
-        }
-
-        // Now we unconditionally make a copy of this exe in place
-        // of the build script.
-        //
-        // NOTE: We do not use a symlink here because otherwise Cargo
-        // will copy the _target_ of the symlink, which results in the
-        // mtime being older than the build attempt. This causes spurious rebuilds.
-        let current_exe = std::env::current_exe().context("Failed to get path to current exe")?;
-        std::fs::copy(current_exe, &build_script_path)
-            .context("Failed to copy 'hope' binary to where build script would have been built")?;
-        // Bump the copy's mtime. In my testing on macOS,
-        // this seems to be necessary or the old mtime gets copied across
-        // causing spurious rebuilds!
-        filetime::set_file_mtime(&build_script_path, filetime::FileTime::now())
-            .with_context(|| format!("Failed to update mtime for {build_script_path:?}."))?;
-
-        // Make a bogus '.d' file for the build script.
-        // I think this is needed for Cargo to create its fingerprint
-        // files and avoid having to recompute a bunch of stuff
-        // from scratch when deciding whether to build crates again.
-        let dot_d_path = build_script_path.with_extension("d");
-        // let mut dot_d_file =
-        //     File::create_new(dot_d_path).context("Failed to create fake '.d' file")?;
-        // TEMP: Allow it to overwrite the file while I'm testing getting the other stuff right.
-        // (I don't want it to fail on this step all the time right now,
-        // and I'm not even convinced that I don't need to allow this...)
-        let mut dot_d_file = File::create(dot_d_path).context("Failed to create fake '.d' file")?;
-        let build_script_path_str = build_script_path
-            .to_str()
-            .context("Bad UTF-8 in build script path")?;
-        dot_d_file.write_all(format!("{build_script_path_str}:").as_bytes())?;
-
-        // Whether we ran rustc or made a fake build script,
-        // we don't want to cache anything. So we're done!
-        return Ok(());
-    }
 
     let mut crate_types = HashSet::new();
     for crate_type_str in &args.crate_types {
@@ -324,6 +241,7 @@ fn main() -> anyhow::Result<()> {
     let output_defns = output_defns(&crate_types, &output_types);
 
     // Try to pull from the cache.
+    //
     // We first pull into a temporary directory, attempt to make any changes
     // we need to the pulled files, and then copy them into the target directory.
     // (This is partly to help with testing, and partly to make it more obvious
@@ -340,12 +258,11 @@ fn main() -> anyhow::Result<()> {
                 let file_name = output_defn.file_name(&crate_unit_name);
                 let arrival_path = arrival_dir.path().join(&file_name);
 
-                // Bump the staging copy's mtime. In my testing on macOS,
-                // this seems to be necessary or the old mtime gets copied across
-                // from local cache causing spurious rebuilds!
-                filetime::set_file_mtime(&arrival_path, filetime::FileTime::now()).with_context(
-                    || format!("Failed to update mtime for arrival file {file_name:?}."),
-                )?;
+                // Set the staging copy's mtime.
+                // See comments on `get_invoked_timestamp_for_crate_build_unit` for why we do this.
+                filetime::set_file_mtime(&arrival_path, invoked_timestamp).with_context(|| {
+                    format!("Failed to update mtime for arrival file {file_name:?}.")
+                })?;
 
                 if *output_defn == OutputDefn::DepInfo {
                     // We want to remove most stuff from dep info files because the
@@ -421,6 +338,49 @@ fn main() -> anyhow::Result<()> {
             // TODO: We should care about the specific error when pulling!
 
             // We weren't able to pull from cache, so we have to ask the real rustc to build it.
+            // But first, we will see if there is a deferred build script to run.
+            let build_script_invocation_info_path =
+                out_dir.join(BUILD_SCRIPT_INVOCATION_INFO_FILE_NAME);
+            if build_script_invocation_info_path.exists() {
+                // Yep, there's a build script to run. Load the description of how
+                // we're supposed to run it, and then run it!
+                let build_script_invocation_info_json =
+                    std::fs::read_to_string(build_script_invocation_info_path)
+                        .context("Failed to read build script invocation info file")?;
+                let build_script_invocation_info: BuildScriptInvocationInfo =
+                    serde_json::from_str(&build_script_invocation_info_json)
+                        .context("Failed to deserialize build script invocation JSON")?;
+                let status = Command::new(&build_script_invocation_info.real_build_script_path)
+                    .current_dir(&build_script_invocation_info.work_dir)
+                    .envs(&build_script_invocation_info.env_vars)
+                    .status()
+                    .context("Failed to start (real) build script")?;
+                if !status.success() {
+                    std::process::exit(
+                        status.code().context(
+                            "Child (real) build script process was terminated by a signal",
+                        )?,
+                    );
+                }
+
+                // Rewind the mtime of anything we find in the build script out dir
+                // to avoid spurious rebuilds.
+                //
+                // See comments on `get_invoked_timestamp_for_crate_build_unit` for
+                // why this is important.
+                let build_script_out_dir = build_script_invocation_info.out_dir()?;
+                let build_script_invoked_timestamp =
+                    build_script_invocation_info.get_invoked_timestamp()?;
+                for entry in walkdir::WalkDir::new(build_script_out_dir) {
+                    let entry = entry.context("Couldn't read dir entry for file in out dir")?;
+                    filetime::set_file_mtime(entry.path(), build_script_invoked_timestamp)
+                        .with_context(|| {
+                            format!("Failed to update mtime for {:?}.", entry.path())
+                        })?;
+                }
+            }
+
+            // Now we can run the real rustc!
             run_real_rustc(&rustc_path, pass_through_args)?;
 
             // Attempt to push the result to cache, via departure dir.
@@ -441,53 +401,63 @@ fn main() -> anyhow::Result<()> {
                 })?;
             }
 
-            // Also copy the build script stdout if there was any.
-            let maybe_build_script_crate_metadata_hash = if let Ok(out_dir) =
-                std::env::var("OUT_DIR")
-            {
-                let out_dir = PathBuf::from_str(&out_dir).context("Bad path in OUT_DIR env")?;
-                let build_dir = out_dir
-                    .parent()
-                    .context("Out dir missing parent directory")?;
-                let build_script_stdout_path_in_build_dir = build_dir.join("output");
-                let build_script_crate_metadata_hash_file_path =
-                    build_dir.join(BUILD_SCRIPT_CRATE_METADATA_HASH_FILE_NAME);
-                let build_script_crate_metadata_hash =
-                    std::fs::read_to_string(&build_script_crate_metadata_hash_file_path)
-                        .with_context(|| {
-                            format!(
-                                "Missing build script crate metadata hash file {:?}",
-                                build_script_crate_metadata_hash_file_path
-                            )
-                        })?;
-                // Make sure we don't bring any trailing newlines or whatever along for the ride.
-                let build_script_crate_metadata_hash =
-                    build_script_crate_metadata_hash.trim().to_owned();
-                let build_script_stdout_file_name =
-                    build_script_stdout_file_name(&build_script_crate_metadata_hash);
-                let build_script_stdout_departure_path =
-                    departure_dir.path().join(&build_script_stdout_file_name);
-
-                std::fs::copy(build_script_stdout_path_in_build_dir, build_script_stdout_departure_path).with_context(|| {
-                    format!("Failed to copy file {build_script_stdout_file_name:?} from target directory to departure directory.")
-                })?;
-
-                Some(build_script_crate_metadata_hash)
-            } else {
-                // This is okay; it just means that there was no build script.
-                None
-            };
-
             cache
-                .push_crate(
-                    &crate_unit_name,
-                    &output_defns,
-                    maybe_build_script_crate_metadata_hash,
-                    departure_dir.path(),
-                )
+                .push_crate(&crate_unit_name, &output_defns, departure_dir.path())
                 .context("Failed to push to cache")?;
         }
     };
+
+    if out_dir.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .expect("Bad string in out dir component")
+            == "build"
+    }) {
+        // This looks like a build script.
+        //
+        // Whether we pulled the build script from cache or build it ourselves,
+        // we will move it out of the way and replace it with a copy of _this_ executable
+        // (i.e. hope itself) to support deferred execution of the build script
+        // during compilation of the main crate.
+        //
+        // TODO: Cargo seems to copy, e.g., "build_script_main" to
+        // "build-script-main" and run it from there. I'm just replacing
+        // the former right now (on the assumption that what I replace it
+        // with will get copied just fine) but I should probably understand why
+        // both exist.
+        //
+        // TODO: Apply binary extension here if relevant.
+        let build_script_path = out_dir.join(&crate_unit_name);
+        let moved_build_script_path = append_moved_build_script_suffix(&build_script_path)
+            .context("Failed to append moved build script path suffix")?;
+        std::fs::rename(&build_script_path, &moved_build_script_path)
+            .context("Failed to move build script out of the way")?;
+
+        // Make a symlink to the real buildscript,
+        // with a predictable name.
+        //
+        // TODO: I'd prefer to not have to do this, but I'm not sure
+        // how to accurately infer the name from the kebab-case "build-script-build"
+        // that we get called as.
+        let real_build_script_symlink_path = out_dir.join("real-build-script");
+        std::os::unix::fs::symlink(moved_build_script_path, real_build_script_symlink_path)
+            .context("Failed to create symlink to the real build script")?;
+
+        // Now make a copy of this exe in place of the build script.
+        //
+        // NOTE: We do not use a symlink here because otherwise Cargo
+        // will copy the _target_ of the symlink, which results in the
+        // mtime being older than the build attempt. This causes spurious rebuilds.
+        let current_exe = std::env::current_exe().context("Failed to get path to 'hope' exe")?;
+        std::fs::copy(current_exe, &build_script_path)
+            .context("Failed to copy 'hope' binary to where build script would have been built")?;
+
+        // Set the copy's mtime.
+        // See comments on `get_invoked_timestamp_for_crate_build_unit` for why we do this.
+        filetime::set_file_mtime(&build_script_path, invoked_timestamp)
+            .with_context(|| format!("Failed to update mtime for {build_script_path:?}."))?;
+    }
 
     Ok(())
 }
@@ -671,4 +641,51 @@ fn output_defns(
         }
     }
     output_defns
+}
+
+/// Get the mtime of the "invoked.timestamp" file associated
+/// with building this crate.
+///
+/// This is used to avoid missed or spurious rebuilds by making sure that the
+/// timestamp on files we emit is greater than or equal to when Cargo
+/// thinks it started the build for this unit, and less than when Cargo
+/// thinks it started any _downstream_ unit.
+///
+/// In my testing, it seems that:
+///
+/// - This is necessary on macOS, because mtime isn't
+///   implicitly bumped there when using `std::fs::copy`. (TODO: Verify this!)
+///
+/// - If we do it, it has to come from an actual file,
+///   _not_ `FileTime::now`, because `SystemTime` doesn't
+///   agree with filesystem timestamps on Linux. I've observed
+///   a SystemTime fetched after modifying a file to be supposedly
+///   _before_ I modified the file. (TODO: It's just as likely that
+///   this is some huge misunderstanding of mine, so understand this better!)
+fn get_invoked_timestamp_for_crate_build_unit(
+    out_dir: &Path,
+    cargo_package_name: &str,
+    metadata_hash: &str,
+) -> anyhow::Result<filetime::FileTime> {
+    // First, walk up until we find a directory with a ".fingerprint" directory inside it.
+    let mut path = out_dir;
+    let fingerprint_dir_path = loop {
+        let fingerprint_dir_path = path.join(".fingerprint");
+        if fingerprint_dir_path.exists() {
+            break fingerprint_dir_path;
+        }
+        path = path
+            .parent()
+            .context("Reached root dir without finding \".fingerprint\" directory")?;
+    };
+    // Now read the mtime of the "invoked.timestamp" file for this crate build unit.
+    let invoked_timestamp_path = fingerprint_dir_path
+        .join(format!("{cargo_package_name}-{metadata_hash}"))
+        .join("invoked.timestamp");
+    let invoked_timestamp_file_metadata = std::fs::metadata(invoked_timestamp_path).context(
+        "Failed to get metadata for \"invoked.timestamp\" file; maybe it doesn't exist?",
+    )?;
+    Ok(filetime::FileTime::from_last_modification_time(
+        &invoked_timestamp_file_metadata,
+    ))
 }
