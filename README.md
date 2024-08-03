@@ -13,8 +13,14 @@ Assumes the use of Cargo, and will never support non-Cargo-based workflows.
 
 ## How do I use it?
 
-I haven't published any releases yet.
-Once I do, I will add some instructions here.
+You probably _shouldn't_ use it yet (because it is still super-buggy), but if you really want to:
+
+```bash
+cargo install hope
+export RUSTC_WRAPPER=$(which hope)
+# In a Cargo project...
+cargo build # etc.
+```
 
 ## Design goals
 
