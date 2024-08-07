@@ -262,7 +262,7 @@ dependencies = [
  "directories",
  "fd-lock",
  "filetime",
- "hope-cache-log 0.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hope-cache-log",
  "serde",
  "serde_json",
  "tempfile",
@@ -272,19 +272,6 @@ dependencies = [
 [[package]]
 name = "hope-cache-log"
 version = "0.0.1"
-dependencies = [
- "anyhow",
- "chrono",
- "fd-lock",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hope-cache-log"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "458060fe61df10e6d89a4f50d2a1a9208a4afe16ff49a56d6d1803aa25e53bf4"
 dependencies = [
  "anyhow",
  "chrono",

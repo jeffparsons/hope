@@ -2,215 +2,120 @@ use std::{
     env,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::LazyLock,
 };
 
 use hope_cache_log::{
-    BuildScriptRunEvent, CacheLogLine, PullCrateOutputsEvent, PushCrateOutputsEvent,
+    BuildScriptRunEvent, BuildScriptWrapperRunEvent, CacheLogLine, PullCrateOutputsEvent,
+    PushCrateOutputsEvent,
 };
 use tempfile::{tempdir, TempDir};
 
 const WRAPPER_PATH: &str = env!("CARGO_BIN_EXE_hope");
 
-// Simple case where the wrapper shouldn't do anything.
-#[test]
-fn build_crate_with_no_deps() {
-    let cache_dir = CacheDir::new();
-    let package = Package::new(&cache_dir);
-    package.build();
+struct DepSpec {
+    name: String,
+    version: String,
+    has_build_script: bool,
 }
 
-// One dependency, without any build script.
-//
-// TODO: I think this actually has a build script. Oops!
-// Add assertions to make sure there is no build script!
-//
-// TODO: Factor most of this out; you should probably
-// just have one example that does a bunch of fun things
-// with a bunch of different crates in a big loop,
-// and then some more targeted unit tests.
+impl DepSpec {
+    pub fn new(name: &str, version: &str, has_build_script: bool) -> Self {
+        Self {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            has_build_script,
+        }
+    }
+}
+
+static TEST_DEPS: LazyLock<Vec<DepSpec>> = LazyLock::new(|| {
+    vec![
+        DepSpec::new("anyhow", "1.0.0", true),
+        DepSpec::new("serde_derive", "1.0.0", false),
+        DepSpec::new("typenum", "1.17.0", true),
+        DepSpec::new("ring", "0.17.8", true),
+    ]
+});
+
 #[test]
-fn build_crate_with_simple_dep() {
+fn build_lots_of_deps() {
     let cache_dir = CacheDir::new();
+
     let package_a = Package::new(&cache_dir);
-    package_a.add("anyhow@1.0.0");
+    for dep in &*TEST_DEPS {
+        package_a.add(&format!("{}@{}", dep.name, dep.version));
+    }
     package_a.build();
 
-    // It should have written it to the cache.
+    // It should have written all direct deps to the cache.
     let log = cache_dir.read_log().unwrap();
+    // TODO: Make some helpers for saying "this, but for all deps in the list"
+    // so that if it fails, it can summarise all the failures.
+    for dep in &*TEST_DEPS {
+        let push_events = filter_push_crate_outputs_events(&log, &dep.name);
+        assert_eq!(push_events.len(), 1);
 
-    let push_events = filter_push_crate_outputs_events(&log, "anyhow");
-    assert_eq!(push_events.len(), 1);
+        if dep.has_build_script {
+            // The build script wrapper should have run.
+            let build_script_wrapper_run_events =
+                filter_ran_build_script_wrapper_events(&log, &dep.name);
+            assert_eq!(build_script_wrapper_run_events.len(), 1);
+
+            // The real build script should have run.
+            let build_script_run_events = filter_ran_build_script_events(&log, &dep.name);
+            assert_eq!(build_script_run_events.len(), 1);
+        }
+    }
 
     // Build the same package again, and make sure it doesn't
     // have to push to the cache again _or_ pull from the cache.
     package_a.build();
 
-    // It should not have needed to build again.
-    let push_events = filter_push_crate_outputs_events(&log, "anyhow");
-    assert_eq!(push_events.len(), 1);
-    let pull_events = filter_pull_crate_outputs_events(&log, "anyhow");
-    assert_eq!(pull_events.len(), 0);
+    // It should not have needed to build again (i.e. neither real build, nor "pull from cache" build).
+    for dep in &*TEST_DEPS {
+        let push_events = filter_push_crate_outputs_events(&log, &dep.name);
+        assert_eq!(push_events.len(), 1);
+        let pull_events = filter_pull_crate_outputs_events(&log, &dep.name);
+        assert_eq!(pull_events.len(), 0);
+
+        if dep.has_build_script {
+            // The build script wrapper should NOT have run again.
+            let build_script_wrapper_run_events =
+                filter_ran_build_script_wrapper_events(&log, &dep.name);
+            assert_eq!(build_script_wrapper_run_events.len(), 1);
+
+            // The real build script should NOT have run.
+            let build_script_run_events = filter_ran_build_script_events(&log, &dep.name);
+            assert_eq!(build_script_run_events.len(), 1);
+        }
+    }
 
     let package_b = Package::new(&cache_dir);
-    package_b.add("anyhow@1.0.0");
+    for dep in &*TEST_DEPS {
+        package_b.add(&format!("{}@{}", dep.name, dep.version));
+    }
     package_b.build();
 
-    // Build for package b should have _pulled_ it from the cache.
+    // Build for package b should have _pulled_ everything from the cache.
     let log = cache_dir.read_log().unwrap();
-    let pull_events = filter_pull_crate_outputs_events(&log, "anyhow");
-    assert_eq!(pull_events.len(), 1);
-}
+    for dep in &*TEST_DEPS {
+        let pull_events = filter_pull_crate_outputs_events(&log, &dep.name);
+        assert_eq!(pull_events.len(), 1);
 
-// Dep with proc macro.
-#[test]
-fn build_dep_with_proc_macro() {
-    let cache_dir = CacheDir::new();
-    let package_a = Package::new(&cache_dir);
-    package_a.add("serde_derive@1.0.0");
-    package_a.build();
+        if dep.has_build_script {
+            // The build script wrapper should have run again.
+            let build_script_wrapper_run_events =
+                filter_ran_build_script_wrapper_events(&log, &dep.name);
+            assert_eq!(build_script_wrapper_run_events.len(), 2);
 
-    // It should have written it to the cache.
-    let log = cache_dir.read_log().unwrap();
-
-    let push_events = filter_push_crate_outputs_events(&log, "serde_derive");
-    assert_eq!(push_events.len(), 1);
-
-    // Build the same package again, and make sure it doesn't
-    // have to push to the cache again _or_ pull from the cache.
-    package_a.build();
-
-    // It should not have needed to build again.
-    let push_events = filter_push_crate_outputs_events(&log, "serde_derive");
-    assert_eq!(push_events.len(), 1);
-    let pull_events = filter_pull_crate_outputs_events(&log, "serde_derive");
-    assert_eq!(pull_events.len(), 0);
-
-    let package_b = Package::new(&cache_dir);
-    package_b.add("serde_derive@1.0.0");
-    package_b.build();
-
-    // Build for package b should have _pulled_ it from the cache.
-    let log = cache_dir.read_log().unwrap();
-    let pull_events = filter_pull_crate_outputs_events(&log, "serde_derive");
-    assert_eq!(pull_events.len(), 1);
-}
-
-#[test]
-fn build_dep_with_build_script() {
-    let cache_dir = CacheDir::new();
-    let package_a = Package::new(&cache_dir);
-    package_a.add("typenum@1.17.0");
-    package_a.build();
-
-    // It should have written it to the cache.
-    let log = cache_dir.read_log().unwrap();
-
-    let push_events = filter_push_crate_outputs_events(&log, "typenum");
-    assert_eq!(push_events.len(), 1);
-
-    // There should have been at least one build script run.
-    // TODO: Tie it back to the main crate. That's a bit fiddly/hacky, but doable.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let first_ran_build_script_event_count = ran_build_script_events.len();
-    assert!(first_ran_build_script_event_count > 0);
-
-    // Build the same package again, and make sure it doesn't
-    // have to push to the cache again _or_ pull from the cache.
-    package_a.build();
-
-    // It should not have needed to build again.
-    let push_events = filter_push_crate_outputs_events(&log, "typenum");
-    assert_eq!(push_events.len(), 1);
-    let pull_events = filter_pull_crate_outputs_events(&log, "typenum");
-    assert_eq!(pull_events.len(), 0);
-
-    // There should not have been any more build script runs.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let subsequent_ran_build_script_event_count = ran_build_script_events.len();
-    assert_eq!(
-        subsequent_ran_build_script_event_count,
-        first_ran_build_script_event_count
-    );
-
-    let package_b = Package::new(&cache_dir);
-    package_b.add("typenum@1.17.0");
-    package_b.build();
-
-    // Build for package b should have _pulled_ it from the cache.
-    let log = cache_dir.read_log().unwrap();
-    let pull_events = filter_pull_crate_outputs_events(&log, "typenum");
-    assert_eq!(pull_events.len(), 1);
-
-    // There should not have been any more build script runs.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let subsequent_ran_build_script_event_count = ran_build_script_events.len();
-    assert_eq!(
-        subsequent_ran_build_script_event_count,
-        first_ran_build_script_event_count
-    );
-}
-
-// Make sure we're actually handling the files and stdout
-// from build scripts properly.
-//
-// TODO: We should probably use something like 'libc'
-// that doesn't have any other dependencies with build scripts.
-// Check that it's actually doing something meaningful
-// (that makes the tests fail if we don't do the right thing)
-// and then switch over.
-#[test]
-fn build_dep_with_build_script_that_builds_stuff() {
-    let cache_dir = CacheDir::new();
-    let package_a = Package::new(&cache_dir);
-    package_a.add("ring@0.17.8");
-    package_a.build();
-
-    // It should have written it to the cache.
-    let log = cache_dir.read_log().unwrap();
-
-    let push_events = filter_push_crate_outputs_events(&log, "ring");
-    assert_eq!(push_events.len(), 1);
-
-    // There should have been at least one build script run.
-    // TODO: Tie it back to the main crate. That's a bit fiddly/hacky, but doable.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let first_ran_build_script_event_count = ran_build_script_events.len();
-    assert!(first_ran_build_script_event_count > 0);
-
-    // Build the same package again, and make sure it doesn't
-    // have to push to the cache again _or_ pull from the cache.
-    package_a.build();
-
-    // It should not have needed to build again.
-    let push_events = filter_push_crate_outputs_events(&log, "ring");
-    assert_eq!(push_events.len(), 1);
-    let pull_events = filter_pull_crate_outputs_events(&log, "ring");
-    assert_eq!(pull_events.len(), 0);
-
-    // There should not have been any more build script runs.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let subsequent_ran_build_script_event_count = ran_build_script_events.len();
-    assert_eq!(
-        subsequent_ran_build_script_event_count,
-        first_ran_build_script_event_count
-    );
-
-    let package_b = Package::new(&cache_dir);
-    package_b.add("ring@0.17.8");
-    package_b.build();
-
-    // Build for package b should have _pulled_ it from the cache.
-    let log = cache_dir.read_log().unwrap();
-    let pull_events = filter_pull_crate_outputs_events(&log, "ring");
-    assert_eq!(pull_events.len(), 1);
-
-    // There should not have been any more build script runs.
-    let ran_build_script_events = filter_ran_build_script_events(&log);
-    let subsequent_ran_build_script_event_count = ran_build_script_events.len();
-    assert_eq!(
-        subsequent_ran_build_script_event_count,
-        first_ran_build_script_event_count
-    );
+            // BUT, the real build script should NOT have run again.
+            // (We should have set up possibly deferred execution of the build script,
+            // and then later decided to not actually run it.)
+            let build_script_run_events = filter_ran_build_script_events(&log, &dep.name);
+            assert_eq!(build_script_run_events.len(), 1);
+        }
+    }
 }
 
 // TODO:
@@ -354,10 +259,41 @@ fn filter_pull_crate_outputs_events(
         .collect()
 }
 
-fn filter_ran_build_script_events(log: &[CacheLogLine]) -> Vec<BuildScriptRunEvent> {
+fn filter_ran_build_script_events(
+    log: &[CacheLogLine],
+    crate_name: &str,
+) -> Vec<BuildScriptRunEvent> {
     log.iter()
         .filter_map(|line| match line {
-            CacheLogLine::RanBuildScript(ran_build_script_event) => Some(ran_build_script_event),
+            CacheLogLine::RanBuildScript(ran_build_script_event) => {
+                if ran_build_script_event.crate_name.starts_with(crate_name) {
+                    Some(ran_build_script_event)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .cloned()
+        .collect()
+}
+
+fn filter_ran_build_script_wrapper_events(
+    log: &[CacheLogLine],
+    crate_name: &str,
+) -> Vec<BuildScriptWrapperRunEvent> {
+    log.iter()
+        .filter_map(|line| match line {
+            CacheLogLine::RanBuildScriptWrapper(ran_build_script_wrapper_event) => {
+                if ran_build_script_wrapper_event
+                    .crate_name
+                    .starts_with(crate_name)
+                {
+                    Some(ran_build_script_wrapper_event)
+                } else {
+                    None
+                }
+            }
             _ => None,
         })
         .cloned()

@@ -16,6 +16,7 @@ pub enum CacheLogLine {
     PulledCrateOutputs(PullCrateOutputsEvent),
     PushedCrateOutputs(PushCrateOutputsEvent),
     RanBuildScript(BuildScriptRunEvent),
+    RanBuildScriptWrapper(BuildScriptWrapperRunEvent),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -47,6 +48,14 @@ pub struct PushCrateOutputsEvent {
 pub struct BuildScriptRunEvent {
     // TODO: Lots of other details
     pub ran_at: chrono::DateTime<Utc>,
+    pub crate_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BuildScriptWrapperRunEvent {
+    // TODO: Lots of other details
+    pub ran_at: chrono::DateTime<Utc>,
+    pub crate_name: String,
 }
 
 pub fn write_log_line(cache_dir: &Path, log_line: CacheLogLine) -> anyhow::Result<()> {

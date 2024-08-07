@@ -11,7 +11,8 @@ repository = "https://github.com/jeffparsons/hope"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
-hope-cache-log = { version = "0.0.1" }
+# hope-cache-log = { version = "0.0.1" }
+hope-cache-log = { path = "../cache-log" }
 filetime = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

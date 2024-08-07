@@ -13,7 +13,9 @@ use std::{
 
 use anyhow::Context;
 use chrono::Utc;
-use hope_cache_log::{write_log_line, BuildScriptRunEvent, CacheLogLine};
+use hope_cache_log::{
+    write_log_line, BuildScriptRunEvent, BuildScriptWrapperRunEvent, CacheLogLine,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{Cache, LocalCache};
@@ -36,7 +38,7 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
         env::var("OUT_DIR").context("Missing 'OUT_DIR' env var for build script execution")?;
     let out_dir =
         PathBuf::from_str(&out_dir).context("'OUT_DIR' env var contained invalid path")?;
-    let (_, run_metadata_hash) = out_dir
+    let (crate_name, run_metadata_hash) = out_dir
         .parent()
         .context("Missing parent on out dir")?
         .file_name()
@@ -45,6 +47,16 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
         .context("Invalid UTF-8 in build dir name")?
         .rsplit_once('-')
         .context("Couldn't find '-' in build dir")?;
+
+    let cache_dir =
+        LocalCache::dir_from_env().context("Failed to get local cache dir from environment")?;
+    write_log_line(
+        &cache_dir,
+        CacheLogLine::RanBuildScriptWrapper(BuildScriptWrapperRunEvent {
+            crate_name: crate_name.to_owned(),
+            ran_at: Utc::now(),
+        }),
+    )?;
 
     // Can we find the stdout of this build script execution in cache?
     let cache = LocalCache::from_env()?;
@@ -112,11 +124,12 @@ pub fn run(called_as: &Path) -> anyhow::Result<()> {
             );
         }
 
-        let cache_dir =
-            LocalCache::dir_from_env().context("Failed to get local cache dir from environment")?;
         write_log_line(
             &cache_dir,
-            CacheLogLine::RanBuildScript(BuildScriptRunEvent { ran_at: Utc::now() }),
+            CacheLogLine::RanBuildScript(BuildScriptRunEvent {
+                crate_name: crate_name.to_string(),
+                ran_at: Utc::now(),
+            }),
         )?;
 
         // Forward child process stdout and stderr.
